@@ -1,6 +1,5 @@
 import numpy as np
 import scipy.linalg as la
-import time
 
 def cho_inv(A):
     L,low = la.cho_factor(A, check_finite=False)
