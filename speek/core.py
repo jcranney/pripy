@@ -1,15 +1,17 @@
 import numpy as np
 import scipy.linalg as la
 
+check_finite = True
+
 def cho_inv(A):
-    L,low = la.cho_factor(A, check_finite=False)
+    L,low = la.cho_factor(A, check_finite=check_finite)
     B = np.eye(L.shape[0])
-    B = la.cho_solve((L,low),B,overwrite_b=True,check_finite=False)
+    B = la.cho_solve((L,low),B,overwrite_b=True,check_finite=check_finite)
     return B
 
 def cho_solve(A,B):
-    L,low = la.cho_factor(A, check_finite=False)
-    C = la.cho_solve((L,low),B,overwrite_b=False, check_finite=False)
+    L,low = la.cho_factor(A, check_finite=check_finite)
+    C = la.cho_solve((L,low),B,overwrite_b=False, check_finite=check_finite)
     return C
 
 class EKF:
@@ -20,12 +22,13 @@ class EKF:
                     dtype: np.dtype = np.float64, delta: float = 1e-3):
         """Initialise EKF for a given dimension of system.
         """
-        self._nstate = nstate
-        self._nmeas  = nmeas
-        self._dtype = dtype
-        self._delta = delta
-        self._static_jacobian = None
+        self._nstate  = nstate
+        self._nmeas   = nmeas
+        self._dtype   = dtype
+        self._delta   = delta
         self._init_ss = False
+        self._static_jacobian = None
+        self._jacobian_func   = None
         self.x_k = np.zeros([self._nstate],self._dtype)
         self.P_k = np.zeros([self._nstate,self._nstate],self._dtype)
         self.K_k = np.zeros([self._nstate,self._nmeas],self._dtype)
@@ -50,7 +53,7 @@ class EKF:
             self.H_k = self._static_jacobian
         else:
             self.H_k = self.linearise_h(self.x_k)
-        self.K_k = cho_solve(self.H_k @ self.P_k @ self.H_k.T + self.SigW,
+        self.K_k = np.linalg.solve(self.H_k @ self.P_k @ self.H_k.T + self.SigW,
                             self.H_k @ self.P_k.T).T
         self.x_k = self.Amat @ self.x_k + self.K_k @ e_k
         self.P_k = self.P_k - self.P_k @ self.H_k.T @ self.K_k.T    
@@ -127,6 +130,10 @@ class EKF:
         self.K_k *= 0.0
         self.x_k *= 0.0
         self._static_jacobian = None
+    
+    def set_jacobian_func(self,func):
+        self._jacobian_func = func
+
 
 class IteratedEKF(EKF):
     def update(self,meas_k):
@@ -136,7 +143,10 @@ class IteratedEKF(EKF):
 
         for it in range(10):
             #print(x_i)
-            H_i = self.linearise_h(x_i)
+            if self._jacobian_func is not None:
+                H_i = self._jacobian_func(x_i)
+            else:
+                H_i = self.linearise_h(x_i)
             K_i = cho_solve(H_i @ self.P_k @ H_i.T + self.SigW,
                             H_i @ self.P_k.T).T
             x_i = self.x_k + K_i @ (meas_k-self._h_model(x_i)-H_i@(self.x_k-x_i))
