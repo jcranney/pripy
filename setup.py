@@ -10,12 +10,12 @@ if os.path.isfile(requirementPath):
     with open(requirementPath) as f:
         install_requires = f.read().splitlines()
 
-setup(name='speek',
+setup(name='pripy',
       version='0.0',
-      description='Segment Piston Estimation using the Extended Kalman Filter',
+      description='Phase Retrieval In PYthon',
       author='Jesse Cranney',
       author_email='jesse.cranney@anu.edu.au',
-      url='https://www.github.com/jcranney/gmt-oiwfs.git',
+      url='https://www.github.com/jcranney/pripy.git',
       install_requires=install_requires,
-      packages=['speek'],
+      packages=['pripy'],
      )

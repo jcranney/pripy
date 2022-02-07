@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt; plt.ion()
-from speek.util import FastAndFurious
+from pripy.util import FastAndFurious
 
 pup_diam = 500
 fourier_diam = 1024
