@@ -10,7 +10,7 @@ from scipy.special import factorial
 import scipy.linalg as la
 
 class FastAndFurious:
-    """ Fast and Furious is a class for computing the phase of a wavefront
+    """Fast and Furious is a class for computing the phase of a wavefront
     from an image using sequential phase diversity. It is based on the
     algorithm described in Korkiakoski et al, Appl. Opt. 53, 4565-4579 (2014).
 
@@ -49,7 +49,7 @@ class FastAndFurious:
     """
     def __init__(self, pup: np.ndarray, im_width: int, fft_width: int, 
                 offset: np.ndarray, epsilon: float = 1e-5):
-        """ Initialise.
+        """ Initialise an instance of FastAndFurious.
         """
         self.im_width   = im_width           # width of image
         self.pup_width  = pup.shape[0] # width of the pupil
@@ -239,4 +239,44 @@ class GerchbergSaxton:
         out_phi *= self.wavelength/(2*cp.pi)
         out_phi -= out_phi.mean()
         return out_phi
-        
+
+class TAME:
+    """Taylor Approximation Moving horizon Estimation (TAME) is a sequential
+    phase-diversity algorithm based on the Moving Horizon Estimation strategy
+    (see, e.g., Goodwin et al (2005)), and an arbitrary order Taylor expansion
+    of the Wavefront sensing model. TAME uses a sequence of focal plane images
+    and DM signals to compute a statistically sound estimate of the residual
+    time-varying wavefront. 
+    
+    """
+
+    def __init__(self, pup: np.ndarray, im_width: int, fft_width: int, 
+                offset: np.ndarray, epsilon: float = 1e-5):
+        """ Initialise an instance of TAME.
+        """
+        self.im_width   = im_width           # width of image
+        self.pup_width  = pup.shape[0] # width of the pupil
+        self.fft_width  = fft_width          # width of fft
+
+        # Set up the (hidden) parameters. These are all either scalars or cupy
+        # arrays.
+        # Pupil in FFT dimensions:
+        self._pup = cp.pad(cp.array(pup),(self.fft_width-pup.shape[0])//2) 
+        # Offset for (e.g.) centering the image on 2x2 pixels:
+        self._offset = self._pup * cp.exp(1j*cp.pad(cp.array(offset),(self.fft_width-self.pup_width)//2))
+        # Recursive parameters:
+        self._v_d = None
+        self._y_d = None
+        self._p_de = None
+        # Reset flag:
+        self._reset = True
+        # Focal plane complex amplitude (real valued -- assuming symmetry in pupil):
+        self._a = (cp.fft.fftshift(cp.fft.fft2(self._pup*self._offset))).real
+        self._a /= self._pup.sum()
+        # Focal plane intensity:
+        self._a2 = self._a**2
+        # Regularisation parameter:
+        self._epsilon = cp.array(epsilon)
+        # Constants:
+        self._ydenom = 2*self._a**2+self._epsilon
+        self._S = 1 # TODO: estimate this on the fly      

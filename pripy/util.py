@@ -398,3 +398,104 @@ class TaylorHModel:
             return
         else:
             raise ValueError("maximum taylor order implemented is 3")
+
+    def general_build_dnys(self,pup,im_width,fft_width,get_phase,offset,wavelength,
+                            delta=1.0):
+        """Build the partial derivative arrays for a general simulation.
+        
+        Parameters
+        ----------
+        pup : ndarray (pup_width,pup_width)
+            The pupil mask.
+        im_width : int
+            The width of the image.
+        fft_width : int
+            The width of the fft.
+        get_phase : callable
+            A function that takes a state vector and returns the phase in the
+            pupil plane.
+        delta : float
+            The step size for the mode-to-phase matrix generation. I.e., if the
+            function is a purely linear combination, then delta doesn't matter.
+        """
+
+        pup_width = pup.shape[0]
+        nstate = self._nstate
+        nmeas = self._nmeas
+
+        dft_matrix = la.dft(fft_width,scale="sqrtn")
+        dft_matrix = np.concatenate([dft_matrix[fft_width//2:,:],dft_matrix[:fft_width//2,]],axis=0)
+        dft_matrix = dft_matrix[:,:pup_width]
+        dft_matrix = dft_matrix[fft_width//2-im_width//2:fft_width//2+im_width//2,:]
+        dft_matrix = np.kron(dft_matrix,dft_matrix)
+        dft_matrix = dft_matrix[:,(pup==1).flatten()]
+
+        mode_to_phase = np.zeros([(pup==1).sum(),nstate])
+
+        x = np.zeros(nstate)        
+        for i in range(nstate):
+            x *= 0.0
+            x[i] = delta
+            phi = get_phase(x)[pup==1]
+            mode_to_phase[:,i] = phi/delta
+
+        self.wavelength = wavelength
+
+        self.g = lambda x: np.exp(1j*(2*np.pi*(mode_to_phase@x/self.wavelength)+offset[pup==1]))
+        self.h_true = lambda x: np.abs(self._dft_matrix @ self.g(x))**2
+        g0 = self.g(x*0)
+        self._mode_to_phase = mode_to_phase
+        self._dft_matrix    = dft_matrix
+
+        d0h = np.abs(dft_matrix @ g0)**2
+        self.set_dny(d0h,0)
+        if self._order < 1:
+            return
+        
+        d1h = np.zeros([nmeas,nstate])
+        for ell1 in range(nstate):
+            m_ell_ = mode_to_phase[:,ell1]
+            d1h[:,ell1] = 2*(2*np.pi/self.wavelength)*((-1j)*((dft_matrix@(g0*m_ell_))).conj()*(dft_matrix@g0)).real
+        self.set_dny(d1h,1)
+        if self._order < 2:
+            return
+
+        d2h = np.zeros([nmeas,nstate,nstate])
+        for ell1 in range(nstate):
+            for ell2 in range(ell1+1):
+                m_ell_1 = mode_to_phase[:,ell1]
+                m_ell_2 = mode_to_phase[:,ell2]
+                tmp = 2*((-1j*2*np.pi/self.wavelength)**2*(
+                            (dft_matrix@(g0*m_ell_1*m_ell_2)).conj()*(dft_matrix@g0)
+                            - (dft_matrix@(g0*m_ell_1)).conj()*(dft_matrix@(g0*m_ell_2))
+                        )).real
+                d2h[:,ell1,ell2] = tmp
+                d2h[:,ell2,ell1] = tmp
+        self.set_dny(d2h,2)
+        if self._order < 3:
+            return
+            
+        d3h = np.zeros([nmeas,nstate,nstate,nstate])
+        for ell1 in range(nstate):
+            for ell2 in range(ell1+1):
+                for ell3 in range(ell2+1):
+                    m_ell_1 = mode_to_phase[:,ell1]
+                    m_ell_2 = mode_to_phase[:,ell2]
+                    m_ell_3 = mode_to_phase[:,ell3]
+                    tmp = 2*((-1j*2*np.pi/self.wavelength)**3*(
+                            (dft_matrix@(g0*m_ell_1*m_ell_2*m_ell_3)).conj()*(dft_matrix@g0)
+                            - (dft_matrix@(g0*m_ell_1*m_ell_2)).conj()*(dft_matrix@(g0*m_ell_3))
+                            - (dft_matrix@(g0*m_ell_1*m_ell_3)).conj()*(dft_matrix@(g0*m_ell_2))
+                            - (dft_matrix@(g0*m_ell_2*m_ell_3)).conj()*(dft_matrix@(g0*m_ell_1))
+                        )).real
+                    d3h[:,ell1,ell2,ell3] = tmp
+                    d3h[:,ell1,ell3,ell2] = tmp
+                    d3h[:,ell2,ell1,ell3] = tmp
+                    d3h[:,ell2,ell3,ell1] = tmp
+                    d3h[:,ell3,ell1,ell2] = tmp
+                    d3h[:,ell3,ell2,ell1] = tmp
+        self.set_dny(d3h,3)
+        if self._order < 4:
+            return
+        else:
+            raise ValueError("maximum taylor order implemented is 3")
