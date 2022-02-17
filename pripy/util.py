@@ -190,214 +190,32 @@ class TaylorHModel:
         else:
             raise ValueError("maximum taylor order implemented is 3")
     
-    def prep(self,sup,nwfs,update_state):    
-        n_px_fft = sup.get_i_pupil().shape[0]
-        n_px_image = sup.wfs.get_wfs_image(nwfs).shape[0]
-        pup = np.array(sup.wfs._wfs.d_wfs[nwfs].d_pupil)
-        xx,yy = cp.meshgrid(cp.arange(pup.shape[0]),cp.arange(pup.shape[0]))
-        pup_mask = pup==1
-        phi = pup.copy()
-        dft_matrix = la.dft(n_px_fft,scale="sqrtn")
-        dft_matrix = np.concatenate([dft_matrix[n_px_fft//2:,:],dft_matrix[:n_px_fft//2,]],axis=0)
-        dft_matrix = dft_matrix[:,:pup.shape[0]]
-        dft_matrix = dft_matrix[n_px_fft//2-n_px_image//2+1:n_px_fft//2+n_px_image//2+1,:]
-        dft_matrix = np.kron(dft_matrix,dft_matrix)
-        dft_matrix = dft_matrix[:,pup_mask.flatten()]
-        mode_to_phase = np.zeros([pup_mask.sum(),self._nstate])
-        x = np.zeros(self._nstate)        
-        for i in range(self._nstate):
-            x *= 0.0
-            delta = 1.0
-            x[i] = delta
-            update_state(x)
-            phi = sup.wfs.get_wfs_phase(nwfs)*pup
-            mode_to_phase[:,i] = phi[pup_mask]/delta
-        self.wavelength = sup.config.p_wfss[nwfs].Lambda
-        self.h_true = lambda x: cp.abs(self.dft_matrix @ self.g(x))**2
-        self.mode_to_phase = cp.array(mode_to_phase)
-        self.dft_matrix    = cp.array(dft_matrix)
-        self.g = lambda x: cp.exp(1j*2*cp.pi*(self.mode_to_phase@x/self.wavelength+(xx+yy)[pup_mask]/n_px_fft/2))
-
-
-
-    def compass_build_dnys_general(self,sup,nwfs,update_state):
-        # nwfs for now is just the index of the WFS we want to use (and it must
-        # be a 1x1 for now)
-        # update_state is a function called with a vector argument which updates
-        # the wfs phase to be the appropriate state.
-        if self.g is None:
-            self.prep(sup,nwfs,update_state)
-
-        x = np.zeros(self._nstate)        
-        x0 = x*0
-        g0 = self.g(x0)
-
-        d0h = np.abs(self.dft_matrix @ g0)**2
-        self.set_dny(d0h,0)
-        if self._order < 1:
-            return
-        print("d0 done")
-        import time
-        t1 = time.time()
-
-        b = self.dft_matrix*g0[None,:]
-        d1h = ((b @ self.mode_to_phase) * (b.conj().sum(axis=1))[:,None]).imag
-        d1h *= -(2*np.pi/self.wavelength)*2 # not sure why negative here, should be positive surely
-
-        print("d1 done")
-        print(f"Time for d1h: {time.time()-t1:0.2f} sec")
-
-        self.set_dny(d1h,1)
-        if self._order < 2:
-            return
-        
-        d2h = np.zeros([n_px_image**2,self._nstate,self._nstate])
-        for ell1 in range(self._nstate):
-            for ell2 in range(ell1+1):
-                m_ell_1 = mode_to_phase[:,ell1]
-                m_ell_2 = mode_to_phase[:,ell2]
-                tmp = 2*((-1j*2*np.pi/self.wavelength)**2*(
-                            (dft_matrix@(g0*m_ell_1*m_ell_2)).conj()*(dft_matrix@g0)
-                            - (dft_matrix@(g0*m_ell_1)).conj()*(dft_matrix@(g0*m_ell_2))
-                        )).real
-                d2h[:,ell1,ell2] = tmp
-                d2h[:,ell2,ell1] = tmp
-        self.set_dny(d2h,2)
-        if self._order < 3:
-            return
-        print("d2 done")
-            
-        d3h = np.zeros([n_px_image**2,self._nstate,self._nstate,self._nstate])
-        for ell1 in range(self._nstate):
-            for ell2 in range(ell1+1):
-                for ell3 in range(ell2+1):
-                    m_ell_1 = mode_to_phase[:,ell1]
-                    m_ell_2 = mode_to_phase[:,ell2]
-                    m_ell_3 = mode_to_phase[:,ell3]
-                    tmp = 2*((-1j*2*np.pi/self.wavelength)**3*(
-                            (dft_matrix@(g0*m_ell_1*m_ell_2*m_ell_3)).conj()*(dft_matrix@g0)
-                            - (dft_matrix@(g0*m_ell_1*m_ell_2)).conj()*(dft_matrix@(g0*m_ell_3))
-                            - (dft_matrix@(g0*m_ell_1*m_ell_3)).conj()*(dft_matrix@(g0*m_ell_2))
-                            - (dft_matrix@(g0*m_ell_2*m_ell_3)).conj()*(dft_matrix@(g0*m_ell_1))
-                        )).real
-                    d3h[:,ell1,ell2,ell3] = tmp
-                    d3h[:,ell1,ell3,ell2] = tmp
-                    d3h[:,ell2,ell1,ell3] = tmp
-                    d3h[:,ell2,ell3,ell1] = tmp
-                    d3h[:,ell3,ell1,ell2] = tmp
-                    d3h[:,ell3,ell2,ell1] = tmp
-        self.set_dny(d3h,3)
-        if self._order < 4:
-            return
-        else:
-            raise ValueError("maximum taylor order implemented is 3")
-        print("d3 done")
-    
     def exact_jacobian(self,x):
-        b = self.dft_matrix*self.g(x)[None,:]
-        d1h = ((b @ self.mode_to_phase) * (b.conj().sum(axis=1))[:,None]).imag
+        b = self._dft_matrix*self.g(x)[None,:]
+        d1h = ((b @ self._mode_to_phase) * (b.conj().sum(axis=1))[:,None]).imag
         d1h *= -(2*np.pi/self.wavelength)*2 # not sure why negative here, should be positive surely
         return d1h
 
-    def compass_build_dnys(self,sup,nwfs,update_state):
-        # nwfs for now is just the index of the WFS we want to use (and it must
-        # be a 1x1 for now)
-        # update_state is a function called with a vector argument which updates
-        # the wfs phase to be the appropriate state.
+    def compass_build_dnys(self,sup,nwfs,get_phase):
+        """build dnys for a single WFS using a COMPASS WFS.
 
-        n_px_fft = sup.get_i_pupil().shape[0]
-        n_px_image = sup.wfs.get_wfs_image(nwfs).shape[0]
-        pup = np.array(sup.wfs._wfs.d_wfs[nwfs].d_pupil)
-        xx,yy = np.meshgrid(np.arange(pup.shape[0]),np.arange(pup.shape[0]))
+        Currently only works for a single full-aperture WFS. Extension to higher
+        order WFSs is relatively straightforward, but not implemented.
 
-        pup_mask = pup==1
-
-        print(f"{n_px_fft=}")
-        print(f"{n_px_image=}")
-        phi = pup.copy()
-        dft_matrix = la.dft(n_px_fft,scale="sqrtn")
-        dft_matrix = np.concatenate([dft_matrix[n_px_fft//2:,:],dft_matrix[:n_px_fft//2,]],axis=0)
-        dft_matrix = dft_matrix[:,:pup.shape[0]]
-        dft_matrix = dft_matrix[n_px_fft//2-n_px_image//2+1:n_px_fft//2+n_px_image//2+1,:]
-        print(dft_matrix.shape)
-        dft_matrix = np.kron(dft_matrix,dft_matrix)
-        dft_matrix = dft_matrix[:,pup_mask.flatten()]
-
-    
-
-        mode_to_phase = np.zeros([pup_mask.sum(),self._nstate])
-
-        x = np.zeros(self._nstate)        
-        for i in range(self._nstate):
-            x *= 0.0
-            delta = 1.0
-            x[i] = delta
-            update_state(x)
-            phi = sup.wfs.get_wfs_phase(nwfs)*pup
-            mode_to_phase[:,i] = phi[pup_mask]/delta
-
-        self.wavelength = sup.config.p_wfss[nwfs].Lambda
-        print(self.wavelength)
-
-        #g0 = np.exp((xx+yy)/pup.shape[0]/2)[pup_mask]
-        self.g = lambda x: np.exp(1j*2*np.pi*(mode_to_phase@x/self.wavelength+(xx+yy)[pup_mask]/n_px_fft/2))
-        self.h_true = lambda x: np.abs(self._dft_matrix @ self.g(x))**2
-        g0 = self.g(x*0)
-        self._mode_to_phase = mode_to_phase
-        self._dft_matrix    = dft_matrix
-
-        d0h = np.abs(dft_matrix @ g0)**2
-        self.set_dny(d0h,0)
-        if self._order < 1:
-            return
-        
-        d1h = np.zeros([n_px_image**2,self._nstate])
-        for ell1 in range(self._nstate):
-            m_ell_ = mode_to_phase[:,ell1]
-            d1h[:,ell1] = 2*(2*np.pi/self.wavelength)*((-1j)*((dft_matrix@(g0*m_ell_))).conj()*(dft_matrix@g0)).real
-        self.set_dny(d1h,1)
-        if self._order < 2:
-            return
-
-        d2h = np.zeros([n_px_image**2,self._nstate,self._nstate])
-        for ell1 in range(self._nstate):
-            for ell2 in range(ell1+1):
-                m_ell_1 = mode_to_phase[:,ell1]
-                m_ell_2 = mode_to_phase[:,ell2]
-                tmp = 2*((-1j*2*np.pi/self.wavelength)**2*(
-                            (dft_matrix@(g0*m_ell_1*m_ell_2)).conj()*(dft_matrix@g0)
-                            - (dft_matrix@(g0*m_ell_1)).conj()*(dft_matrix@(g0*m_ell_2))
-                        )).real
-                d2h[:,ell1,ell2] = tmp
-                d2h[:,ell2,ell1] = tmp
-        self.set_dny(d2h,2)
-        if self._order < 3:
-            return
-            
-        d3h = np.zeros([n_px_image**2,self._nstate,self._nstate,self._nstate])
-        for ell1 in range(self._nstate):
-            for ell2 in range(ell1+1):
-                for ell3 in range(ell2+1):
-                    m_ell_1 = mode_to_phase[:,ell1]
-                    m_ell_2 = mode_to_phase[:,ell2]
-                    m_ell_3 = mode_to_phase[:,ell3]
-                    tmp = 2*((-1j*2*np.pi/self.wavelength)**3*(
-                            (dft_matrix@(g0*m_ell_1*m_ell_2*m_ell_3)).conj()*(dft_matrix@g0)
-                            - (dft_matrix@(g0*m_ell_1*m_ell_2)).conj()*(dft_matrix@(g0*m_ell_3))
-                            - (dft_matrix@(g0*m_ell_1*m_ell_3)).conj()*(dft_matrix@(g0*m_ell_2))
-                            - (dft_matrix@(g0*m_ell_2*m_ell_3)).conj()*(dft_matrix@(g0*m_ell_1))
-                        )).real
-                    d3h[:,ell1,ell2,ell3] = tmp
-                    d3h[:,ell1,ell3,ell2] = tmp
-                    d3h[:,ell2,ell1,ell3] = tmp
-                    d3h[:,ell2,ell3,ell1] = tmp
-                    d3h[:,ell3,ell1,ell2] = tmp
-                    d3h[:,ell3,ell2,ell1] = tmp
-        self.set_dny(d3h,3)
-        if self._order < 4:
-            return
-        else:
-            raise ValueError("maximum taylor order implemented is 3")
+        Parameters
+        ----------
+        sup : CompassSupervisor object
+            The supervisor object
+        nwfs : int
+            The index of the WFS to use
+        get_phase : function
+            A function which returns the phase of the WFS in the 
+        """
+        self.general_build_dnys(pup=np.array(sup.wfs._wfs.d_wfs[nwfs].d_pupil),
+            im_width=sup.wfs.get_wfs_image(nwfs).shape[0],
+            fft_width=sup.get_i_pupil().shape[0], get_phase=get_phase,
+            offset=-np.array(sup.wfs._wfs.d_wfs[nwfs].d_offsets),
+            wavelength=sup.config.p_wfss[0].get_Lambda())
 
     def general_build_dnys(self,pup,im_width,fft_width,get_phase,offset,wavelength,
                             delta=1.0):
@@ -423,7 +241,7 @@ class TaylorHModel:
         nstate = self._nstate
         nmeas = self._nmeas
 
-        dft_matrix = la.dft(fft_width,scale="sqrtn")
+        dft_matrix = la.dft(fft_width,scale=None)
         dft_matrix = np.concatenate([dft_matrix[fft_width//2:,:],dft_matrix[:fft_width//2,]],axis=0)
         dft_matrix = dft_matrix[:,:pup_width]
         dft_matrix = dft_matrix[fft_width//2-im_width//2:fft_width//2+im_width//2,:]
@@ -499,3 +317,98 @@ class TaylorHModel:
             return
         else:
             raise ValueError("maximum taylor order implemented is 3")
+    
+    def _general_build_dnys(self,pup,im_width,fft_width,get_phase,offset,wavelength,
+                            delta=1.0):
+        # experimental, do not use. Goal is to build dnys for an arbitrary order,
+        # but it's difficult to code up. We have the equations, but the implementation
+        # is another thing.
+        pup_width = pup.shape[0]
+        nstate = self._nstate
+        nmeas = self._nmeas
+
+        dft_matrix = la.dft(fft_width,scale=None)
+        dft_matrix = np.concatenate([dft_matrix[fft_width//2:,:],dft_matrix[:fft_width//2,]],axis=0)
+        dft_matrix = dft_matrix[:,:pup_width]
+        dft_matrix = dft_matrix[fft_width//2-im_width//2:fft_width//2+im_width//2,:]
+        dft_matrix = np.kron(dft_matrix,dft_matrix)
+        dft_matrix = dft_matrix[:,(pup==1).flatten()]
+
+        mode_to_phase = np.zeros([(pup==1).sum(),nstate])
+
+        x = np.zeros(nstate)        
+        for i in range(nstate):
+            x *= 0.0
+            x[i] = delta
+            phi = get_phase(x)[pup==1]
+            mode_to_phase[:,i] = phi/delta
+
+        self.wavelength = wavelength
+
+        self.g = lambda x: np.exp(1j*(2*np.pi*(mode_to_phase@x/self.wavelength)+offset[pup==1]))
+        self.h_true = lambda x: np.abs(self._dft_matrix @ self.g(x))**2
+        g0 = self.g(x*0)
+        self._mode_to_phase = mode_to_phase
+        self._dft_matrix    = dft_matrix
+
+        d0h = np.abs(self.dft_matrix @ g0)**2
+        self.set_dny(d0h,0)
+        if self._order < 1:
+            return
+        print("d0 done")
+        import time
+        t1 = time.time()
+
+        b = self.dft_matrix*g0[None,:]
+        d1h = ((b @ self.mode_to_phase) * (b.conj().sum(axis=1))[:,None]).imag
+        d1h *= -(2*np.pi/self.wavelength)*2 # not sure why negative here, should be positive surely
+
+        print("d1 done")
+        print(f"Time for d1h: {time.time()-t1:0.2f} sec")
+
+        self.set_dny(d1h,1)
+        if self._order < 2:
+            return
+        
+        d2h = np.zeros([self._nmeas,self._nstate,self._nstate])
+        for ell1 in range(self._nstate):
+            for ell2 in range(ell1+1):
+                m_ell_1 = mode_to_phase[:,ell1]
+                m_ell_2 = mode_to_phase[:,ell2]
+                tmp = 2*((-1j*2*np.pi/self.wavelength)**2*(
+                            (dft_matrix@(g0*m_ell_1*m_ell_2)).conj()*(dft_matrix@g0)
+                            - (dft_matrix@(g0*m_ell_1)).conj()*(dft_matrix@(g0*m_ell_2))
+                        )).real
+                d2h[:,ell1,ell2] = tmp
+                d2h[:,ell2,ell1] = tmp
+        self.set_dny(d2h,2)
+        if self._order < 3:
+            return
+        print("d2 done")
+            
+        d3h = np.zeros([self._nmeas,self._nstate,self._nstate,self._nstate])
+        for ell1 in range(self._nstate):
+            for ell2 in range(ell1+1):
+                for ell3 in range(ell2+1):
+                    m_ell_1 = mode_to_phase[:,ell1]
+                    m_ell_2 = mode_to_phase[:,ell2]
+                    m_ell_3 = mode_to_phase[:,ell3]
+                    tmp = 2*((-1j*2*np.pi/self.wavelength)**3*(
+                            (dft_matrix@(g0*m_ell_1*m_ell_2*m_ell_3)).conj()*(dft_matrix@g0)
+                            - (dft_matrix@(g0*m_ell_1*m_ell_2)).conj()*(dft_matrix@(g0*m_ell_3))
+                            - (dft_matrix@(g0*m_ell_1*m_ell_3)).conj()*(dft_matrix@(g0*m_ell_2))
+                            - (dft_matrix@(g0*m_ell_2*m_ell_3)).conj()*(dft_matrix@(g0*m_ell_1))
+                        )).real
+                    d3h[:,ell1,ell2,ell3] = tmp
+                    d3h[:,ell1,ell3,ell2] = tmp
+                    d3h[:,ell2,ell1,ell3] = tmp
+                    d3h[:,ell2,ell3,ell1] = tmp
+                    d3h[:,ell3,ell1,ell2] = tmp
+                    d3h[:,ell3,ell2,ell1] = tmp
+        self.set_dny(d3h,3)
+        print("d3 done")
+        if self._order < 4:
+            return
+        else:
+            raise ValueError("maximum taylor order implemented is 3")
+    

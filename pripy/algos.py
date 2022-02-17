@@ -6,8 +6,8 @@ except ImportError as ie:
 
 import numpy as np
 
-from scipy.special import factorial
-import scipy.linalg as la
+import scipy.optimize as opt
+from scipy.linalg import block_diag
 
 class FastAndFurious:
     """Fast and Furious is a class for computing the phase of a wavefront
@@ -166,9 +166,223 @@ class FastAndFurious:
         self._y_d = cp.fft.fftshift(cp.fft.ifft2(dphi_big_o)).imag
         self._v_d = cp.fft.fftshift(cp.fft.ifft2(dphi_big_e)).real
 
+class MHEStatic:
+    """Moving Horizon Estimator with a static phase assumption (i.e., A=eye)
+    """
+
+    def __init__(self, nstate: int, nmeas: int, nbuffer: int, noise_cov: np.ndarray,
+            state_cov: np.ndarray, state_matrix: np.ndarray, h_eval: callable, 
+            h_jac: callable = None, h_hess: callable = None, opt_method: str = 'BFGS',
+            cost_scaling: float = 1.0, callback: callable = None):
+        """Initialise the estimator
+        """
+        self._nstate = nstate               # len(x)
+        self._nmeas = nmeas                 # len(y)
+        self._nbuffer = nbuffer             # mhe horizon length
+        
+        self._h_eval = h_eval               # h(x)
+        self._h_jac = h_jac                 # dh(x)/dx
+        self._h_hess = h_hess               # d^2h(x)/dx^2
+        self._opt_method = opt_method       # optimisation method
+
+        self._gamma = np.linalg.inv(state_cov)
+        self._noise_cov_inv = np.linalg.inv(noise_cov)
+
+        self._cost_scaling = cost_scaling
+        self._callback = callback
+
+    def cost(self, x, x_dm, yd):
+        """Evaluate MHE cost function for state, x, measurements, yd, and
+        dm sequence, x_dm.
+        """
+        cost  = (x).T @ self._gamma @ (x)
+        h  = np.r_[[self._h_eval(x+(x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]]
+        cost += np.sum([hi.T @ self._noise_cov_inv @ hi for hi in h],axis=0)
+        cost += - 2 * np.sum([hi.T @ self._noise_cov_inv @ ydi 
+                            for hi,ydi in zip(h,yd)],axis=0)
+        return cost*self._cost_scaling
 
 
-class GerchbergSaxton:
+    def jac(self, x, x_dm, yd):
+        """
+        x should be (N,NSTATE)
+        """
+        h     = [self._h_eval(x+(x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]
+        dhdx  = [self._h_jac(x+(x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]
+        djdx  = 2*(self._gamma @ x)
+        djdx += 2*np.sum([dhidx.T @ self._noise_cov_inv @ hi 
+                            for dhidx,hi in zip(dhdx,h)],axis=0)
+        djdx -= 2*np.sum([dhidx.T @ self._noise_cov_inv @ ydi 
+                            for dhidx,ydi in zip(dhdx,yd)],axis=0)
+        return djdx*self._cost_scaling
+
+    def hess(self, x, x_dm, yd):
+        """
+        x should be (N,NSTATE)
+        """
+        h       = [self._h_eval(x+(x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]
+        dhdx    = [self._h_jac(x+(x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]
+        d2hdx2  = [self._h_hess(x+(x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]
+        d2jdx2  = 2*(self._gamma)
+        d2jdx2 += 2*np.sum([d2hidx2.T @ self._noise_cov_inv @ hi 
+                            for d2hidx2,hi in zip(d2hdx2,h)],axis=0)
+        d2jdx2 += 2*np.sum([dhidx.T @ self._noise_cov_inv @ dhidx 
+                            for dhidx in dhdx],axis=0)
+        d2jdx2 -= 2*np.sum([d2hidx2.T @ self._noise_cov_inv @ ydi 
+                            for d2hidx2,ydi in zip(d2hdx2,yd)],axis=0)
+        return d2jdx2*self._cost_scaling
+    
+    def get_estimate(self, x0, x_dm, yd):
+        """Get the current estimate of the state based on recent priors.
+
+        Args:
+            x0 (np.ndarray): Initial state estimate (best guess)
+            x_dm (np.ndarray): dm sequence (N,NSTATE)
+            yd (np.ndarray): Measurement sequence (N,NMEAS)
+
+        Returns:
+
+        """
+
+        cost_fun = lambda x : self.cost(x, x_dm, yd)
+        jac_fun  = None
+        hess_fun = None        
+        if self._h_jac is not None:
+            jac_fun = lambda x: self.jac(x, x_dm, yd)
+            if self._h_hess is not None:
+                hess_fun = lambda x: self.hess(x, x_dm, yd)
+        xopt = opt.minimize(cost_fun, x0, jac=jac_fun, hess=hess_fun,
+                             method=self._opt_method, callback=self._callback)
+        self._xopt = xopt # save most recent output for debugging
+        return xopt["x"]
+
+class MHE:
+    """Moving Horizon Estimator
+    """
+
+    def __init__(self, nstate: int, nmeas: int, nbuffer: int, noise_cov: np.ndarray,
+            state_cov: np.ndarray, state_matrix: np.ndarray, h_eval: callable, 
+            h_jac: callable = None, h_hess: callable = None, opt_method: str = 'BFGS',
+            cost_scaling: float = 1.0, callback: callable = None, opt_options: dict = None):
+        """Initialise the estimator
+        """
+        self._nstate = nstate               # len(x)
+        self._nmeas = nmeas                 # len(y)
+        self._nbuffer = nbuffer             # mhe horizon length
+
+        self._h_eval = h_eval               # h(x)
+        self._h_jac = h_jac                 # dh(x)/dx
+        self._h_hess = h_hess               # d^2h(x)/dx^2
+        self._opt_method = opt_method       # optimisation method
+        self._opt_options = opt_options     # optimisation options
+        process_cov = state_cov - state_matrix @ state_cov @ state_matrix.T
+
+        state_cov_inv   = np.linalg.inv(state_cov)
+        process_cov_inv = np.linalg.inv(process_cov)
+        
+        gamma = np.zeros([nstate*nbuffer,nstate*nbuffer])
+        gamma[:nstate,:nstate]   = state_cov_inv - process_cov_inv
+        gamma[-nstate:,-nstate:] = -state_matrix.T @ process_cov_inv @ state_matrix
+        for mi in range(nbuffer):
+            for ni in range(nbuffer):
+                if mi==ni:
+                    tmp = state_matrix.T @ process_cov_inv @ state_matrix + process_cov_inv
+                    gamma[mi*nstate:(mi+1)*nstate,ni*nstate:(ni+1)*nstate] += tmp
+                elif mi==(ni+1):
+                    tmp = -process_cov_inv @ state_matrix
+                    gamma[mi*nstate:(mi+1)*nstate,ni*nstate:(ni+1)*nstate] = tmp
+                elif mi==(ni-1):
+                    tmp = -state_matrix.T @ process_cov_inv
+                    gamma[mi*nstate:(mi+1)*nstate,ni*nstate:(ni+1)*nstate] = tmp
+
+        self._gamma = gamma
+        self._noise_cov_inv = np.linalg.inv(noise_cov)
+
+        self._cost_scaling = cost_scaling
+        self._callback = callback
+
+    def cost(self, x, x_dm, yd):
+        """Evaluate MHE cost function for state, x, measurements, yd, and
+        dm sequence, x_dm.
+        """
+        cost  = (x).T @ self._gamma @ (x)
+        h  = np.r_[[self._h_eval((x+x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]]
+        cost += np.sum([hi.T @ self._noise_cov_inv @ hi for hi in h],axis=0)
+        cost += - 2 * np.sum([hi.T @ self._noise_cov_inv @ ydi 
+                            for hi,ydi in zip(h,yd)],axis=0)
+        return cost*self._cost_scaling
+
+
+    def jac(self, x, x_dm, yd):
+        """
+        x should be (N,NSTATE)
+        """
+        h     = [self._h_eval((x+x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]
+        dhdx  = [self._h_jac((x+x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]
+        djdx  = 2*(self._gamma @ x)
+        djdx += 2*np.concatenate([dhidx.T @ self._noise_cov_inv @ hi 
+                            for dhidx,hi in zip(dhdx,h)],axis=0)
+        djdx -= 2*np.concatenate([dhidx.T @ self._noise_cov_inv @ ydi 
+                            for dhidx,ydi in zip(dhdx,yd)],axis=0)
+        return djdx*self._cost_scaling
+
+    def hess(self, x, x_dm, yd):
+        """
+        x should be (N,NSTATE)
+        """
+        h       = [self._h_eval((x+x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]
+        dhdx    = [self._h_jac((x+x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]
+        d2hdx2  = [self._h_hess((x+x_dm)[self._nstate*i:self._nstate*(i+1)]) 
+                            for i in range(self._nbuffer)]
+        d2jdx2  = 2*(self._gamma)
+        d2jdx2 += 2*block_diag(*[d2hidx2.T @ self._noise_cov_inv @ hi 
+                            for d2hidx2,hi in zip(d2hdx2,h)])
+        d2jdx2 += 2*block_diag(*[dhidx.T @ self._noise_cov_inv @ dhidx 
+                            for dhidx in dhdx])
+        d2jdx2 -= 2*block_diag(*[d2hidx2.T @ self._noise_cov_inv @ ydi 
+                            for d2hidx2,ydi in zip(d2hdx2,yd)])
+        return d2jdx2*self._cost_scaling
+    
+    def get_estimate(self, x0, x_dm, yd):
+        """Get the current estimate of the state based on recent priors.
+
+        Args:
+            x0 (np.ndarray): Initial state estimate (best guess)
+            x_dm (np.ndarray): dm sequence (N,NSTATE)
+            yd (np.ndarray): Measurement sequence (N,NMEAS)
+
+        Returns:
+
+        """
+
+        cost_fun = lambda x : self.cost(x, x_dm, yd)
+        jac_fun  = None
+        hess_fun = None        
+        if self._h_jac is not None:
+            jac_fun = lambda x: self.jac(x, x_dm, yd)
+            if self._h_hess is not None:
+                hess_fun = lambda x: self.hess(x, x_dm, yd)
+        xopt = opt.minimize(cost_fun, x0, jac=jac_fun, hess=hess_fun,
+                             method=self._opt_method, callback=self._callback,
+                             options=self._opt_options)
+        self._xopt = xopt # save most recent output for debugging
+        return xopt["x"][-self._nstate:]
+
+class _GerchbergSaxton:
+    """
+    Incomplete implementation, not yet used.
+    """
     def __init__(self,pup,wavelength,fft_width,im_width):
         self.im_width = im_width
         self.fft_width = fft_width
@@ -181,11 +395,11 @@ class GerchbergSaxton:
         self.invalid_pixels = cp.fft.fftshift(cp.pad(cp.ones([im_width,im_width]),(self.fft_width-im_width)//2)==0)
 
     def rebin(self, a, newshape ):
-            '''Rebin an array to a new shape.
-            newshape must be a factor of a.shape.
-            '''
-            slices = [ slice(None,None, old/new) for old,new in zip(a.shape,newshape) ]
-            return a[slices]
+        '''Rebin an array to a new shape.
+        newshape must be a factor of a.shape.
+        '''
+        slices = [ slice(None,None, old/new) for old,new in zip(a.shape,newshape) ]
+        return a[slices]
 
     def gs_run(self,phasepup_shft,amp_shft,iterations=20,hio_param=0.3):
         # inputs:
@@ -239,44 +453,3 @@ class GerchbergSaxton:
         out_phi *= self.wavelength/(2*cp.pi)
         out_phi -= out_phi.mean()
         return out_phi
-
-class TAME:
-    """Taylor Approximation Moving horizon Estimation (TAME) is a sequential
-    phase-diversity algorithm based on the Moving Horizon Estimation strategy
-    (see, e.g., Goodwin et al (2005)), and an arbitrary order Taylor expansion
-    of the Wavefront sensing model. TAME uses a sequence of focal plane images
-    and DM signals to compute a statistically sound estimate of the residual
-    time-varying wavefront. 
-    
-    """
-
-    def __init__(self, pup: np.ndarray, im_width: int, fft_width: int, 
-                offset: np.ndarray, epsilon: float = 1e-5):
-        """ Initialise an instance of TAME.
-        """
-        self.im_width   = im_width           # width of image
-        self.pup_width  = pup.shape[0] # width of the pupil
-        self.fft_width  = fft_width          # width of fft
-
-        # Set up the (hidden) parameters. These are all either scalars or cupy
-        # arrays.
-        # Pupil in FFT dimensions:
-        self._pup = cp.pad(cp.array(pup),(self.fft_width-pup.shape[0])//2) 
-        # Offset for (e.g.) centering the image on 2x2 pixels:
-        self._offset = self._pup * cp.exp(1j*cp.pad(cp.array(offset),(self.fft_width-self.pup_width)//2))
-        # Recursive parameters:
-        self._v_d = None
-        self._y_d = None
-        self._p_de = None
-        # Reset flag:
-        self._reset = True
-        # Focal plane complex amplitude (real valued -- assuming symmetry in pupil):
-        self._a = (cp.fft.fftshift(cp.fft.fft2(self._pup*self._offset))).real
-        self._a /= self._pup.sum()
-        # Focal plane intensity:
-        self._a2 = self._a**2
-        # Regularisation parameter:
-        self._epsilon = cp.array(epsilon)
-        # Constants:
-        self._ydenom = 2*self._a**2+self._epsilon
-        self._S = 1 # TODO: estimate this on the fly      

@@ -2,9 +2,12 @@
 # coding: utf-8
 
 import numpy as np
-import matplotlib.pyplot as plt; plt.ion()
+import matplotlib.pyplot as plt
+
+from pripy.algos import MHEStatic; plt.ion()
 #from pripy import TAME
 from pripy import TaylorHModel
+from pripy import MHE
 from tqdm import tqdm
 from aotools import zernike
 
@@ -54,25 +57,7 @@ def trim_im(im,trimmed_width=im_width):
         im.shape[1]//2-trimmed_width//2:im.shape[1]//2+trimmed_width//2
         ]
 
-# constant wavefront phase to be corrected
-phase_s_0 = 0.2*np.sin(xx_s*2*np.pi*3)+0.5*np.cos((xx_s+yy_s)*2*np.pi*2)
-
-def get_phase_perfect(x,pup_diam=pup_width,piston=0.0):
-    """Get phase from modal coefficients, but only using the two modes
-    present in the aberration.
-    
-    Args:
-        x (ndarray): modal coefficients
-        pup_diam (int): size of the pupil
-
-    Returns:
-        ndarray: phase in pupil dimensions
-    """
-    phi = x[0]*np.sin(xx_s*2*np.pi*3)+x[1]*np.cos((xx_s+yy_s)*2*np.pi*2)
-    #phi = zernike.phaseFromZernikes(np.r_[piston,x],pup_diam,norm="p2v")
-    return phi*pup_s
-
-def get_phase(x,pup_diam=pup_width,piston=0.0):
+def get_phase_zernike(x,pup_diam=pup_width,include_piston=False):
     """Get phase from modal coefficients
     
     Args:
@@ -82,75 +67,35 @@ def get_phase(x,pup_diam=pup_width,piston=0.0):
     Returns:
         ndarray: phase in pupil dimensions
     """
-    phi = zernike.phaseFromZernikes(np.r_[piston,x],pup_diam,norm="p2v")
+    if include_piston:
+        phi = zernike.phaseFromZernikes(np.r_[x],pup_diam,norm="p2v")
+    else:
+        phi = zernike.phaseFromZernikes(np.r_[0.0,x],pup_diam,norm="p2v")
     return phi*pup_s
 
-nstate=30
+get_phase = get_phase_zernike
+np.random.seed(74)
+x_init = np.random.randn(10)*2
+phase_s_0 = get_phase(x_init)
 
-nstate=2
-get_phase = get_phase_perfect
+nstate = len(x_init)
+nmeas  = im_width**2
 
-h_taylor = TaylorHModel(3,im_width**2,nstate)
+h_taylor = TaylorHModel(3,nmeas,nstate)
 h_taylor.general_build_dnys(pup_s,im_width,fft_width,get_phase,phase_offset,(np.pi*2))
 
-x0 = np.zeros(nstate)
+nbuffer = 5
+cost_scaling = 1e-9
+Sigma_x = 1e6*0.05*np.eye(nstate)
+Sigma_w = 1e6*1e-7*np.eye(h_taylor.dny[0].shape[0])
+A_mat = np.eye(nstate)*0.9999
 
-# big assumption that they are all decoupled:
-SigX_mech = (0.1)**2*np.ones(nstate)
-SigXp1_mech = 0.99*SigX_mech
-mask_mech = np.zeros(nstate)
-mask_mech[1:1+7] = 1.0
-A_mech = (SigXp1_mech/SigX_mech)*mask_mech
-B_mech = mask_mech*(SigX_mech-A_mech**2*SigX_mech)**0.5
-x_mech = mask_mech*(np.random.randn(nstate)*(SigX_mech**0.5))
-
-N_BUFFER = 5
-scaling_factor = 1e-5
-
-def cost(x,x_dm,yd,h_eval,Gamma,Sigma_w_inv):
-    """
-    x should be (N,NSTATE).
-    """
-    J  = ((x).T @ Gamma @ (x))
-    h  = np.r_[[h_eval(x+(x_dm)[nstate*i:nstate*(i+1)]) for i in range(N_BUFFER)]]
-    J += np.sum([hi.T @ Sigma_w_inv @ hi for hi in h],axis=0)
-    J += - 2 * np.sum([hi.T @ Sigma_w_inv @ ydi for hi,ydi in zip(h,yd)],axis=0)
-    return J*scaling_factor
-
-def jac(x,x_dm,yd,h_eval,h_jac,Gamma,Sigma_w_inv):
-    """
-    x should be (N,NSTATE)
-    """
-    h     = [h_eval(x+(x_dm)[nstate*i:nstate*(i+1)]) for i in range(N_BUFFER)]
-    dhdx  = [ h_jac(x+(x_dm)[nstate*i:nstate*(i+1)]) for i in range(N_BUFFER)]
-    djdx  = 2*(Gamma @ x)
-    djdx += 2*np.sum([dhidx.T @ Sigma_w_inv @ hi for dhidx,hi in zip(dhdx,h)],axis=0)
-    djdx -= 2*np.sum([dhidx.T @ Sigma_w_inv @ ydi for dhidx,ydi in zip(dhdx,yd)],axis=0)
-    return djdx*scaling_factor
-
-def hess(x,x_dm,yd,h_eval,h_jac,h_hess,Gamma,Sigma_w_inv):
-    """
-    x should be (N,NSTATE)
-    """
-    h       = [h_eval(x+(x_dm)[nstate*i:nstate*(i+1)]) for i in range(N_BUFFER)]
-    dhdx    = [ h_jac(x+(x_dm)[nstate*i:nstate*(i+1)]) for i in range(N_BUFFER)]
-    d2hdx2  = [h_hess(x+(x_dm)[nstate*i:nstate*(i+1)]) for i in range(N_BUFFER)]
-    d2jdx2  = 2*(Gamma)
-    d2jdx2 += 2*np.sum([d2hidx2.T @ Sigma_w_inv @ hi for d2hidx2,hi in zip(d2hdx2,h)],axis=0)
-    d2jdx2 += 2*np.sum([dhidx.T @ Sigma_w_inv @ dhidx for dhidx in dhdx],axis=0)
-    d2jdx2 -= 2*np.sum([d2hidx2.T @ Sigma_w_inv @ ydi for d2hidx2,ydi in zip(d2hdx2,yd)],axis=0)
-    return d2jdx2*scaling_factor
-
-h_eval = h_taylor.eval
-h_jac  = h_taylor.jacobian
-h_hess = h_taylor.hessian
-
-Sigma_x = 0.01*np.eye(nstate)
-Sigma_x_inv = np.linalg.inv(Sigma_x)
-Gamma = Sigma_x_inv
-Sigma_w_inv = (1)*np.eye(h_taylor.dny[0].shape[0])
-
-nactu = nstate
+#mve = MHE(nstate, nmeas, nbuffer, noise_cov=Sigma_w, state_cov=Sigma_x,
+#            state_matrix=A_mat, h_eval=h_taylor.eval, h_jac=h_taylor.jacobian, 
+#            h_hess=None, cost_scaling=cost_scaling)
+mve = MHEStatic(nstate, nmeas, nbuffer, noise_cov=Sigma_w, state_cov=Sigma_x,
+            state_matrix=A_mat, h_eval=h_taylor.eval, h_jac=h_taylor.jacobian, 
+            h_hess=None, cost_scaling=cost_scaling)
 
 gain = 0.5
 leak = 0.99
@@ -160,54 +105,46 @@ niter = 50
 x_dm = []
 tar_phase = []
 tar_im    = []
-xk_opt = None
 yd = []
-y_phase = []
-x_dm_save = []
 
 x_corr = np.zeros(nstate)
-x_corr = np.random.randn(2)
 
 # uncorrected wavefront phase:
 plt.matshow(phase_s_0-get_phase(x_corr))
+
+y = trim_im(phase_to_image(phase_s_0-get_phase(x_corr)),trimmed_width=im_width).flatten()
+ax = plt.matshow(y.reshape((im_width,im_width)))
+plt.colorbar()
+
 err = []
 costs = []
-for i in range(niter):
+for i in tqdm(range(niter),leave=False):
     y = trim_im(phase_to_image(phase_s_0-get_phase(x_corr)),trimmed_width=im_width).flatten()
     yd.append(y/y.sum()*h_taylor.dny[0].get().sum())
     x_dm.append(-x_corr)
-    if i >= 10:
-        ydk   = np.array(yd[-N_BUFFER:])
-        xk_dm = np.array(x_dm[-N_BUFFER:]).flatten()
+    if i >= nbuffer:
+        ydk   = np.array(yd[-nbuffer:])
+        xk_dm = np.array(x_dm[-nbuffer:]).flatten()
+        #x_0 = -np.tile(xk_dm[-nstate:],(nbuffer,1)).flatten()
         x_0 = -xk_dm[-nstate:]
-        xk_opt = opt.minimize(lambda x: cost(x,xk_dm,ydk,h_eval,Gamma,Sigma_w_inv),
-                             x0,
-                             jac=lambda x: jac(x,xk_dm,ydk,h_eval,h_jac,Gamma,Sigma_w_inv),
-                             #hess=lambda x: hess(x,xk_dm,ydk,h_eval,h_jac,h_hess,Gamma,Sigma_w_inv),
-                             #method="Newton-CG",options={'xtol': 1e-09,"maxiter":100})
-                             method="BFGS")
-        print((xk_opt["x"]+xk_dm[-nstate:]))
-        x_corr    = leak*x_corr + gain*((xk_opt["x"]+xk_dm[-nstate:]))
-        print(xk_opt)
+        xk_opt = mve.get_estimate(x_0,xk_dm,ydk)
+        x_corr    = leak*x_corr + gain*((xk_opt+xk_dm[-nstate:]))
+        costs.append(mve._xopt["fun"])
+        print(mve._xopt)
+    ax.set_data(y.reshape((im_width,im_width)))
+    ax.set_clim([y.min(),y.max()])
     err.append((phase_s_0-get_phase(x_corr))[pup_s==1].std())
-    costs.append([xk_opt["fun"] if xk_opt is not None else np.nan])
-    print(f"{i:4d} : {err[-1]:0.3f} : [{x_corr[0]:9.5f} , {x_corr[1]:9.5f} ] : {[xk_opt['status'] if xk_opt else -1][0]:d}")
-
+    plt.title(f"Iteration {i:d}\nError: {err[-1]:0.3f}")
+    plt.savefig("tame_%03d.png"%i)
+    
 # error over time
 plt.figure()
-plt.subplot(311)
 plt.plot(err,label='error')
 plt.title('Phase error')
 plt.xlabel('Iteration')
 plt.ylabel('Error [rad RMS]')
 plt.legend()
 
-plt.subplot(312)
-plt.plot(np.r_[[yd[i].max()/h_taylor.dny[0].get().max() for i in range(i+1)]],label="strehl")
-
-plt.subplot(313)
-plt.plot(np.r_[costs].flatten(),label='cost')
-
 # residual wavefront phase:
 plt.matshow(phase_s_0-get_phase(x_corr))
-
+plt.matshow(y.reshape([20,20]))
