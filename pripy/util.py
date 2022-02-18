@@ -191,9 +191,26 @@ class TaylorHModel:
             raise ValueError("maximum taylor order implemented is 3")
     
     def exact_jacobian(self,x):
+        if type(x) is np.ndarray:
+            CPU = True
+            x = cp.array(x)
+        elif type(x) is cp.ndarray:
+            CPU = False
+        else:
+            raise TypeError("input x must be either numpy or cupy array")
+        b = self._dft_matrix_cp*self.g_cp(x)[None,:]
+        out = ((b @ self._mode_to_phase_cp) * (b.conj().sum(axis=1))[:,None]).imag
+        out *= -(2*cp.pi/self.wavelength)*2 # not sure why negative here, should be positive surely
+        if CPU:
+            return out.get()
+        else:
+            return out
+    
+    def _exact_jacobian(self,x):
+        # deprecated, will be deleted soon
         b = self._dft_matrix*self.g(x)[None,:]
         d1h = ((b @ self._mode_to_phase) * (b.conj().sum(axis=1))[:,None]).imag
-        d1h *= -(2*np.pi/self.wavelength)*2 # not sure why negative here, should be positive surely
+        d1h *= -(2*cp.pi/self.wavelength)*2 # not sure why negative here, should be positive surely
         return d1h
 
     def compass_build_dnys(self,sup,nwfs,get_phase):
@@ -211,10 +228,12 @@ class TaylorHModel:
         get_phase : function
             A function which returns the phase of the WFS in the 
         """
-        self.general_build_dnys(pup=np.array(sup.wfs._wfs.d_wfs[nwfs].d_pupil),
+        offset = np.array(sup.wfs._wfs.d_wfs[nwfs].d_offsets)
+        offset -= offset.mean()
+        self.general_build_dnys(pup=sup.get_s_pupil(),
             im_width=sup.wfs.get_wfs_image(nwfs).shape[0],
-            fft_width=sup.get_i_pupil().shape[0], get_phase=get_phase,
-            offset=-np.array(sup.wfs._wfs.d_wfs[nwfs].d_offsets),
+            fft_width=sup.wfs._wfs.d_wfs[nwfs].nfft, get_phase=get_phase,
+            offset=-offset,
             wavelength=sup.config.p_wfss[0].get_Lambda())
 
     def general_build_dnys(self,pup,im_width,fft_width,get_phase,offset,wavelength,
@@ -259,11 +278,17 @@ class TaylorHModel:
 
         self.wavelength = wavelength
 
-        self.g = lambda x: np.exp(1j*(2*np.pi*(mode_to_phase@x/self.wavelength)+offset[pup==1]))
-        self.h_true = lambda x: np.abs(self._dft_matrix @ self.g(x))**2
-        g0 = self.g(x*0)
+        self._offset        = offset[pup==1]
         self._mode_to_phase = mode_to_phase
         self._dft_matrix    = dft_matrix
+        self._offset_cp        = cp.array(offset[pup==1])
+        self._mode_to_phase_cp = cp.array(mode_to_phase)
+        self._dft_matrix_cp    = cp.array(dft_matrix)
+        self.g = lambda x: np.exp(1j*(2*np.pi*(self._mode_to_phase@x/self.wavelength)+self._offset))
+        self.g_cp = lambda x: cp.exp(1j*(2*cp.pi*(self._mode_to_phase_cp@x/self.wavelength)+self._offset_cp))
+        self.h_true = lambda x: np.abs(self._dft_matrix @ self.g(x))**2
+        self.h_true_cp = lambda x: cp.abs(self._dft_matrix_cp @ self.g_cp(x))**2
+        g0 = self.g(x*0)
 
         d0h = np.abs(dft_matrix @ g0)**2
         self.set_dny(d0h,0)
