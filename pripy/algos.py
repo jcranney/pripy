@@ -401,7 +401,7 @@ class GerchbergSaxton:
         slices = [ slice(None,None, old/new) for old,new in zip(a.shape,newshape) ]
         return a[slices]
 
-    def gs_run(self,phasepup_shft,amp_shft,iterations=20,hio_param=0.3):
+    def gs_run(self,phasepup_shft,amp_shft,iterations=20,hio_param=0.3,invalid_pixels=None):
         # inputs:
         # ~~~~~~~
         #
@@ -425,7 +425,7 @@ class GerchbergSaxton:
             
             cplxim_shft2 = ((1.+hio_param)*amp_shft-hio_param*ampim_shft)*cp.exp(-1j*phaseim_shft)
             if self.invalid_pixels is not None:
-                cplxim_shft2[self.invalid_pixels] = cplxim_shft[self.invalid_pixels].copy() 
+                cplxim_shft2[invalid_pixels] = cplxim_shft[invalid_pixels].copy() 
 
             cplxpup_shft2 = cp.fft.ifft2(cplxim_shft2)
             phasepup_shft = -cp.angle(cplxpup_shft2)
@@ -433,7 +433,7 @@ class GerchbergSaxton:
             
         return phasepup_shft
 
-    def get_phase(self,im,iters=100,init=None,hio_param=0.3):
+    def get_phase(self,im,iters=100,init=None,hio_param=0.3,discard_invalid=True):
         im = cp.array(im)*(self.scf/im.sum())
         im = cp.pad(im,(self.fft_width-self.im_width)//2)
         im = im**0.5
@@ -446,8 +446,12 @@ class GerchbergSaxton:
                 pass
             else:
                 init = cp.pad(init,(self.fft_width-init.shape[0])//2)
-
-        out_phi_shft = self.gs_run(init,im_shft,iterations=iters,hio_param=hio_param)
+        if discard_invalid:
+            invalid_pixels = self.invalid_pixels
+        else:
+            invalid_pixels = None
+        out_phi_shft = self.gs_run(init,im_shft,iterations=iters,hio_param=hio_param,
+                                    invalid_pixels=invalid_pixels)
         out_phi  = cp.fft.ifftshift(out_phi_shft)[self.pup==1]
         out_phi -= self.half_pix_phase
         out_phi *= self.wavelength/(2*cp.pi)
