@@ -390,8 +390,8 @@ class GerchbergSaxton:
         self.pup_shft = cp.fft.fftshift(self.pup)
         self.wavelength = wavelength
         self.scf = (cp.abs(cp.fft.fft2(self.pup_shft))**2).sum()
-        self.half_pix_phase = cp.mgrid[:self.fft_width,:self.fft_width].sum(axis=0)*(cp.pi/self.fft_width)
-        self.half_pix_phase = self.half_pix_phase[self.pup==1]
+        #self.half_pix_phase = cp.mgrid[:self.fft_width,:self.fft_width].sum(axis=0)*(2*cp.pi/self.fft_width/2)
+        #self.half_pix_phase = self.half_pix_phase[self.pup==1]
         self.invalid_pixels = cp.fft.fftshift(cp.pad(cp.ones([im_width,im_width]),(self.fft_width-im_width)//2)==0)
 
     def rebin(self, a, newshape ):
@@ -440,7 +440,7 @@ class GerchbergSaxton:
         im_shft = cp.fft.fftshift(im)
         
         if init is None:
-            init = cp.random.randn(*self.pup_shft.shape)/10
+            init = cp.random.randn(*self.pup_shft.shape)
         else:
             if cp.all(cp.r_[init.shape]==self.fft_width):
                 pass
@@ -452,8 +452,7 @@ class GerchbergSaxton:
             invalid_pixels = None
         out_phi_shft = self.gs_run(init,im_shft,iterations=iters,hio_param=hio_param,
                                     invalid_pixels=invalid_pixels)
-        out_phi  = cp.fft.ifftshift(out_phi_shft)[self.pup==1]
-        out_phi -= self.half_pix_phase
+        out_phi  = cp.fft.ifftshift(out_phi_shft)
+        #out_phi -= self.half_pix_phase
         out_phi *= self.wavelength/(2*cp.pi)
-        out_phi -= out_phi.mean()
         return out_phi
