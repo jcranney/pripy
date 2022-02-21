@@ -12,7 +12,7 @@ from aotools import zernike
 from shesha.supervisor.compassSupervisor import CompassSupervisor
 from shesha.config import ParamConfig
 
-config = ParamConfig("compass_ngs.py")
+config = ParamConfig("compass_par_tt.py")
 sup = CompassSupervisor(config)
 nwfs = 0
 niter = 500
@@ -74,7 +74,7 @@ get_phase = lambda x : get_phase_from_btt(x)
 #get_phase = lambda x : get_phase_from_weird(x)
 #v = vv
 
-nstate = 20
+nstate = 40
 nmodes_max = 100
 nmeas  = im_width**2
 

@@ -12,7 +12,7 @@ from aotools import zernike
 from shesha.supervisor.compassSupervisor import CompassSupervisor
 from shesha.config import ParamConfig
 
-config = ParamConfig("compass_ngs.py")
+config = ParamConfig("compass_par_tt.py")
 sup = CompassSupervisor(config)
 nwfs = 0
 niter = 500
@@ -74,7 +74,7 @@ get_phase = lambda x : get_phase_from_btt(x)
 #get_phase = lambda x : get_phase_from_weird(x)
 #v = vv
 
-nstate = 20
+nstate = 40
 nmodes_max = 100
 nmeas  = im_width**2
 
@@ -101,8 +101,7 @@ A_mat = np.eye(nstate)*0.9999
 #            state_matrix=A_mat, h_eval=h_taylor.eval, h_jac=h_taylor.jacobian, 
 #            h_hess=None, cost_scaling=cost_scaling)
 mve = MHEStatic(nstate, nmeas, nbuffer, noise_cov=Sigma_w, state_cov=Sigma_x,
-            state_matrix=A_mat, h_eval=h_taylor.eval, h_jac=h_taylor.jacobian, 
-            h_hess=None, cost_scaling=cost_scaling)
+                h_eval=h_taylor.eval, h_jac=h_taylor.jacobian, cost_scaling=cost_scaling)
 
 gain = 0.4
 leak = 0.99

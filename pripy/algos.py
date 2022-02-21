@@ -171,8 +171,8 @@ class MHEStatic:
     """
 
     def __init__(self, nstate: int, nmeas: int, nbuffer: int, noise_cov: np.ndarray,
-            state_cov: np.ndarray, state_matrix: np.ndarray, h_eval: callable, 
-            h_jac: callable = None, h_hess: callable = None, opt_method: str = 'BFGS',
+            state_cov: np.ndarray, h_eval: callable, h_jac: callable = None, 
+            h_hess: callable = None, opt_method: str = 'BFGS',
             cost_scaling: float = 1.0, callback: callable = None):
         """Initialise the estimator
         """
@@ -379,7 +379,7 @@ class MHE:
         self._xopt = xopt # save most recent output for debugging
         return xopt["x"][-self._nstate:]
 
-class _GerchbergSaxton:
+class GerchbergSaxton:
     """
     Incomplete implementation, not yet used.
     """
