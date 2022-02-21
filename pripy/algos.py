@@ -363,7 +363,7 @@ class MHE:
             yd (np.ndarray): Measurement sequence (N,NMEAS)
 
         Returns:
-
+            np.ndarray: Current state estimate
         """
 
         cost_fun = lambda x : self.cost(x, x_dm, yd)
@@ -380,44 +380,78 @@ class MHE:
         return xopt["x"][-self._nstate:]
 
 class GerchbergSaxton:
-    """
-    Incomplete implementation, not yet used.
+    """Gerchberg-Saxton algorithm for estimating the phase of a wavefront given
+    the pupil mask and focal-plane image.
+
+    Args:
+        pup : (np.ndarray)
+            Pupil mask, will be padded to be fft_width x fft_width.
+        wavelength : (float)
+            Wavelength of light, in whatever units you like. Retrieved phase will
+            be in the same units.
+        fft_width : (int)
+            Width of the FFT support in pixels.
+        im_width : (int)
+            Width of the image in pixels.
+    
+    Methods:
+        compute_phase : Compute the phase of the wavefront.
+
+    WARNING: Incomplete implementation.
+    Requires:
+     - binning considerations.
     """
     def __init__(self,pup,wavelength,fft_width,im_width):
-        self.im_width = im_width
-        self.fft_width = fft_width
-        self.pup = cp.pad(cp.array(pup),(self.fft_width-pup.shape[0])//2)
-        self.pup_shft = cp.fft.fftshift(self.pup)
-        self.wavelength = wavelength
-        self.scf = (cp.abs(cp.fft.fft2(self.pup_shft))**2).sum()
+        self._im_width = im_width
+        self._fft_width = fft_width
+        self._pup = cp.pad(cp.array(pup),(self._fft_width-pup.shape[0])//2)
+        self._pup_shft = cp.fft.fftshift(self._pup)
+        self._wavelength = wavelength
+        self._scf = (cp.abs(cp.fft.fft2(self._pup_shft))**2).sum()
         #self.half_pix_phase = cp.mgrid[:self.fft_width,:self.fft_width].sum(axis=0)*(2*cp.pi/self.fft_width/2)
         #self.half_pix_phase = self.half_pix_phase[self.pup==1]
-        self.invalid_pixels = cp.fft.fftshift(cp.pad(cp.ones([im_width,im_width]),(self.fft_width-im_width)//2)==0)
+        self.invalid_pixels = cp.fft.fftshift(
+                cp.pad(cp.ones([self._im_width,self._im_width]),
+                (self._fft_width-self._im_width)//2) == 0)
 
-    def rebin(self, a, newshape ):
-        '''Rebin an array to a new shape.
-        newshape must be a factor of a.shape.
-        '''
+    def _rebin(self, a, newshape ):
+        """
+        Rebin an array to a new shape.
+        
+        Args:
+            a (np.ndarray): Array to be rebinned
+            newshape (tuple): New shape of the array
+
+        Returns:
+            np.ndarray: Rebinned array
+        """
         slices = [ slice(None,None, old/new) for old,new in zip(a.shape,newshape) ]
         return a[slices]
 
-    def gs_run(self,phasepup_shft,amp_shft,iterations=20,hio_param=0.3,invalid_pixels=None):
-        # inputs:
-        # ~~~~~~~
-        #
-        # phasepup_shft: starting phase at the pupil plane
-        # pupil_shft: amplitude at the pupil plane
-        # amp_shft: amplitude at the focal plane
-        # iterations: number of iterations
-        #
-        # outputs:
-        # ~~~~~~~~
-        #
-        # phasepup_shft: final phase at the pupil plane
-        #
-        amppup_shft = self.pup_shft.copy()
+    def _gs_run(self,phasepup_shft,amp_shft,iterations=20,hio_param=0.3,invalid_pixels=None):
+        """Run the GS algorithm on the input values.
+
+        Args:
+            phasepup_shft : (cp.ndarray)
+                Initial guess of phase at pupil after fft-shifting (fft_width,fft_width).
+            amp_shft : (cp.ndarray)
+                Focal-plane amplitude after fft-shifting (fft_width,fft_width).
+            iterations : (int)
+                Number of iterations to run.
+            hio_param : (float)
+                Parameter for HIO step.
+            invalid_pixels : (cp.ndarray)
+                Invalid pixels (fft_width,fft_width). If not None, will be used to
+                mask out invalid pixels in focal-plane.
+
+        Returns:
+            phasepup_shft : (cp.ndarray)
+                Phase estimate from GS iterations (im_width,im_width)
+        """
+        
+        amppup_shft = self._pup_shft.copy()
         for it in range(iterations):
-            cplxpup_shft = ((1.+hio_param)*self.pup_shft-hio_param*amppup_shft)*cp.exp(-1j*phasepup_shft)    
+            cplxpup_shft = ((1.+hio_param)*self._pup_shft-hio_param*amppup_shft)*cp.exp(-1j*phasepup_shft)    
             cplxim_shft = cp.fft.fft2(cplxpup_shft)
             
             phaseim_shft = -cp.angle(cplxim_shft)
@@ -433,26 +467,44 @@ class GerchbergSaxton:
             
         return phasepup_shft
 
-    def get_phase(self,im,iters=100,init=None,hio_param=0.3,discard_invalid=True):
-        im = cp.array(im)*(self.scf/im.sum())
-        im = cp.pad(im,(self.fft_width-self.im_width)//2)
+    def compute_phase(self,im,iters=100,init=None,hio_param=0.3,discard_invalid=True):
+        """Compute and return the phase estimated by the Gerchberg-Saxton algorithm,
+        given an image.
+
+        Args:
+            im (np.ndarray): Image to perform GS on.
+            iters (int): Number of iterations of GS to perform.
+            init (np/cp.ndarray): Initial guess for the phase.
+            hio_param (float): Parameter for the HIO step.
+            discard_invalid (bool): If True, discard invalid pixels in WFS image.
+
+        Returns:
+            np.ndarray: Phase estimate.
+        """
+        if init is np.ndarray:
+            init = cp.array(init)
+        im = cp.array(im)*(self._scf/im.sum())
+        im = cp.pad(im,(self._fft_width-self._im_width)//2)
         im = im**0.5
         im_shft = cp.fft.fftshift(im)
         
         if init is None:
-            init = cp.random.randn(*self.pup_shft.shape)
+            init = cp.random.randn(*self._pup_shft.shape)
         else:
-            if cp.all(cp.r_[init.shape]==self.fft_width):
+            if cp.all(cp.r_[init.shape]==self._fft_width):
                 pass
             else:
-                init = cp.pad(init,(self.fft_width-init.shape[0])//2)
+                init = cp.pad(init,(self._fft_width-init.shape[0])//2)
         if discard_invalid:
             invalid_pixels = self.invalid_pixels
         else:
             invalid_pixels = None
-        out_phi_shft = self.gs_run(init,im_shft,iterations=iters,hio_param=hio_param,
+        out_phi_shft = self._gs_run(init,im_shft,iterations=iters,hio_param=hio_param,
                                     invalid_pixels=invalid_pixels)
         out_phi  = cp.fft.ifftshift(out_phi_shft)
         #out_phi -= self.half_pix_phase
-        out_phi *= self.wavelength/(2*cp.pi)
-        return out_phi
+        out_phi *= self._wavelength/(2*cp.pi)
+        if hasattr(out_phi,"get"):
+            return out_phi.get()
+        else:
+            return out_phi
