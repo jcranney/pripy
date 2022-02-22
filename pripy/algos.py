@@ -404,8 +404,9 @@ class GerchbergSaxton:
     def __init__(self,pup,wavelength,fft_width,im_width):
         self._im_width = im_width
         self._fft_width = fft_width
-        self._pup = cp.pad(cp.array(pup),(self._fft_width-pup.shape[0])//2)
-        self._pup_shft = cp.fft.fftshift(self._pup)
+        self._pup_width = pup.shape[0]
+        pup_big = cp.pad(cp.array(pup),(self._fft_width-pup.shape[0])//2)
+        self._pup_shft = cp.fft.fftshift(pup_big)
         self._wavelength = wavelength
         self._scf = (cp.abs(cp.fft.fft2(self._pup_shft))**2).sum()
         #self.half_pix_phase = cp.mgrid[:self.fft_width,:self.fft_width].sum(axis=0)*(2*cp.pi/self.fft_width/2)
@@ -458,7 +459,7 @@ class GerchbergSaxton:
             ampim_shft = cp.abs(cplxim_shft)
             
             cplxim_shft2 = ((1.+hio_param)*amp_shft-hio_param*ampim_shft)*cp.exp(-1j*phaseim_shft)
-            if self.invalid_pixels is not None:
+            if invalid_pixels is not None:
                 cplxim_shft2[invalid_pixels] = cplxim_shft[invalid_pixels].copy() 
 
             cplxpup_shft2 = cp.fft.ifft2(cplxim_shft2)
