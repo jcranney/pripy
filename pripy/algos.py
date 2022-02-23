@@ -401,7 +401,7 @@ class GerchbergSaxton:
     Requires:
      - binning considerations.
     """
-    def __init__(self,pup,wavelength,fft_width,im_width):
+    def __init__(self,pup,wavelength,fft_width,im_width,offset=None):
         self._im_width = im_width
         self._fft_width = fft_width
         self._pup_width = pup.shape[0]
@@ -409,6 +409,7 @@ class GerchbergSaxton:
         self._pup_shft = cp.fft.fftshift(pup_big)
         self._wavelength = wavelength
         self._scf = (cp.abs(cp.fft.fft2(self._pup_shft))**2).sum()
+        self._offset_shft = cp.fft.fftshift(cp.pad(cp.array(offset),(self._fft_width-offset.shape[0])//2))
         #self.half_pix_phase = cp.mgrid[:self.fft_width,:self.fft_width].sum(axis=0)*(2*cp.pi/self.fft_width/2)
         #self.half_pix_phase = self.half_pix_phase[self.pup==1]
         self.invalid_pixels = cp.fft.fftshift(
@@ -452,18 +453,18 @@ class GerchbergSaxton:
         
         amppup_shft = self._pup_shft.copy()
         for it in range(iterations):
-            cplxpup_shft = ((1.+hio_param)*self._pup_shft-hio_param*amppup_shft)*cp.exp(-1j*phasepup_shft)    
+            cplxpup_shft = ((1.+hio_param)*self._pup_shft-hio_param*amppup_shft)*cp.exp(1j*phasepup_shft)    
             cplxim_shft = cp.fft.fft2(cplxpup_shft)
             
-            phaseim_shft = -cp.angle(cplxim_shft)
+            phaseim_shft = cp.angle(cplxim_shft)
             ampim_shft = cp.abs(cplxim_shft)
             
-            cplxim_shft2 = ((1.+hio_param)*amp_shft-hio_param*ampim_shft)*cp.exp(-1j*phaseim_shft)
+            cplxim_shft2 = ((1.+hio_param)*amp_shft-hio_param*ampim_shft)*cp.exp(1j*phaseim_shft)
             if invalid_pixels is not None:
                 cplxim_shft2[invalid_pixels] = cplxim_shft[invalid_pixels].copy() 
 
             cplxpup_shft2 = cp.fft.ifft2(cplxim_shft2)
-            phasepup_shft = -cp.angle(cplxpup_shft2)
+            phasepup_shft = cp.angle(cplxpup_shft2)
             amppup_shft = cp.abs(cplxpup_shft2)
             
         return phasepup_shft
@@ -502,11 +503,12 @@ class GerchbergSaxton:
             invalid_pixels = None
         out_phi_shft = self._gs_run(init,im_shft,iterations=iters,hio_param=hio_param,
                                     invalid_pixels=invalid_pixels)
+        if self._offset_shft is not None:
+            out_phi_shft -= cp.array(self._offset_shft)
         out_phi  = cp.fft.ifftshift(out_phi_shft)[
             (self._fft_width-self._pup_width)//2:(self._fft_width+self._pup_width)//2,
             (self._fft_width-self._pup_width)//2:(self._fft_width+self._pup_width)//2
                 ]
-        #out_phi -= self.half_pix_phase
         out_phi *= self._wavelength/(2*cp.pi)
         if hasattr(out_phi,"get"):
             return out_phi.get()
