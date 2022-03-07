@@ -393,6 +393,9 @@ class GerchbergSaxton:
             Width of the FFT support in pixels.
         im_width : (int)
             Width of the image in pixels.
+        offset : (np.ndarray)
+            implicit constant phase offset (in radians), e.g. to centre image on
+            a quadcell (2x2 pixels), rather than a single pixel (default).
     
     Methods:
         compute_phase : Compute the phase of the wavefront.
@@ -402,16 +405,34 @@ class GerchbergSaxton:
      - binning considerations.
     """
     def __init__(self,pup,wavelength,fft_width,im_width,offset=None):
+        # the image, pupil, and fft support need not be the same size, though
+        # im_width and pup_width must be no larger than the fft_width.
         self._im_width = im_width
         self._fft_width = fft_width
         self._pup_width = pup.shape[0]
+
+        # pad the pupil mask to be in the fft support
         pup_big = cp.pad(cp.array(pup),(self._fft_width-pup.shape[0])//2)
+        # fft shift pupil so we can do less fft-shifts each iteration
         self._pup_shft = cp.fft.fftshift(pup_big)
+        
+        # user-exposed wavefront phase will always be in the units inferred by
+        # wavelength (except for the offset phase, which is in radians). E.g.,
+        # gs.compute_phase(im) returns wavefront phase in wavelength units.
         self._wavelength = wavelength
+        
+        # scaling factor for image normalisation
         self._scf = (cp.abs(cp.fft.fft2(self._pup_shft))**2).sum()
-        self._offset_shft = cp.fft.fftshift(cp.pad(cp.array(offset),(self._fft_width-offset.shape[0])//2))
-        #self.half_pix_phase = cp.mgrid[:self.fft_width,:self.fft_width].sum(axis=0)*(2*cp.pi/self.fft_width/2)
-        #self.half_pix_phase = self.half_pix_phase[self.pup==1]
+        
+        # user-supplied offset is padded and fft-shifted, to be applied before
+        # and removed after gs algorithm (such that it is invisible to the user)
+        if offset is not None:
+            self._offset_shft = cp.fft.fftshift(cp.pad(cp.array(offset),
+                                        (self._fft_width-offset.shape[0])//2))
+        else:
+            self._offset_shft = None
+        # assume that the pixels outside the imager are invalid. This attribute
+        # can be set by the user if a different "invalid_pixel" range is desired.
         self.invalid_pixels = cp.fft.fftshift(
                 cp.pad(cp.ones([self._im_width,self._im_width]),
                 (self._fft_width-self._im_width)//2) == 0)
@@ -476,40 +497,66 @@ class GerchbergSaxton:
         Args:
             im (np.ndarray): Image to perform GS on.
             iters (int): Number of iterations of GS to perform.
-            init (np/cp.ndarray): Initial guess for the phase.
-            hio_param (float): Parameter for the HIO step.
+            init (np/cp.ndarray): Initial guess for the phase (wavelength units).
+            hio_param (float): Parameter for the Hybrid Input-Output (HIO) step.
             discard_invalid (bool): If True, discard invalid pixels in WFS image.
 
         Returns:
-            np.ndarray: Phase estimate.
+            np.ndarray: Phase estimate (in wavelength units).
         """
-        if init is np.ndarray:
-            init = cp.array(init)
         im = cp.array(im)*(self._scf/im.sum())
         im = cp.pad(im,(self._fft_width-self._im_width)//2)
         im = im**0.5
         im_shft = cp.fft.fftshift(im)
         
-        if init is None:
+        # prepare init for GS
+        if init is None: 
+            # if init is not provided then random init
             init = cp.random.randn(*self._pup_shft.shape)
         else:
-            if cp.all(cp.r_[init.shape]==self._fft_width):
-                pass
-            else:
+            # init is provided, so convert to cp.ndarray 
+            # (recalling that cupy === numpy if cupy isn't available)
+            if type(init) is not cp.ndarray:
+                init = cp.array(init)
+            # assume init was provided in wavelength units, so convert to radians
+            init = init * (2*cp.pi/self._wavelength)
+            
+            # if init is not big enough, pad it with the same convention as the pupil padding
+            if not cp.all(cp.r_[init.shape]==self._fft_width):
                 init = cp.pad(init,(self._fft_width-init.shape[0])//2)
+            # fftshift to be self consistent.
+            init = cp.fft.fftshift(init)
+
+        # if an offset was provided in object creation, apply it to the init phase
+        if self._offset_shft is not None:
+            init += self._offset_shft
+
+        # check if user wants to discard invalid pixels this time
         if discard_invalid:
             invalid_pixels = self.invalid_pixels
         else:
             invalid_pixels = None
+        
+        # perform gs algo
         out_phi_shft = self._gs_run(init,im_shft,iterations=iters,hio_param=hio_param,
                                     invalid_pixels=invalid_pixels)
+        
+        # if an offset was provided in object creation, remove it from the GS estimated
+        # phase.
         if self._offset_shft is not None:
-            out_phi_shft -= cp.array(self._offset_shft)
+            out_phi_shft -= self._offset_shft
+        
+        # inverse fftshift and trim to pupil size
         out_phi  = cp.fft.ifftshift(out_phi_shft)[
             (self._fft_width-self._pup_width)//2:(self._fft_width+self._pup_width)//2,
             (self._fft_width-self._pup_width)//2:(self._fft_width+self._pup_width)//2
                 ]
+        
+        # scale output phase to be in wavelength units
         out_phi *= self._wavelength/(2*cp.pi)
+
+        # return numpy array. Recall that cupy might just be an alias for numpy
+        # if cupy is not available, so have to check if cp.array has a "get" method.
         if hasattr(out_phi,"get"):
             return out_phi.get()
         else:
