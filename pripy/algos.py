@@ -399,6 +399,8 @@ class GerchbergSaxton:
     
     Methods:
         compute_phase : Compute the phase of the wavefront.
+        reset : Reset the init_phase for the GS iterations.
+
 
     WARNING: Incomplete implementation.
     Requires:
@@ -437,6 +439,43 @@ class GerchbergSaxton:
                 cp.pad(cp.ones([self._im_width,self._im_width]),
                 (self._fft_width-self._im_width)//2) == 0)
 
+        # init phase to be used if not provided by user in compute_phase() func
+        self.reset()
+
+    def reset(self,init_phase=None):
+        """
+        Reset the init_phase for the GS iterations.
+        
+        Args:
+            init_phase : np.ndarray
+                array to be used as the initialisation phase the next time
+                compute_phase() is called. If None, will be randomised.
+        """
+        if init_phase is None:
+            # by default, use a random initialisation
+            self._phasepup_shft = cp.random.randn(*self._pup_shft.shape)
+        else:
+            # init is provided, so convert to cp.ndarray
+            # (recalling that cupy === numpy if cupy isn't available)
+            if type(init_phase) is not cp.ndarray:
+                init_phase = cp.array(init_phase)
+            # assume init was provided in wavelength units, so convert to radians
+            init_phase = init_phase * (2*cp.pi/self._wavelength)
+            
+            # if init is not big enough, pad it with the same convention as the pupil padding
+            if not cp.all(cp.r_[init_phase.shape]==self._fft_width):
+                init_phase = cp.pad(init_phase,(self._fft_width-init_phase.shape[0])//2)
+            # fftshift to be self consistent.
+            init_phase = cp.fft.fftshift(init_phase)
+
+            # if an offset was provided in object creation, apply it to the init phase
+            if self._offset_shft is not None:
+                init_phase += self._offset_shft
+            
+            # copy the new init to the init_phase attribute to be used in _gs_run
+            self._phasepup_shft = init_phase.copy()
+
+
     def _rebin(self, a, newshape ):
         """
         Rebin an array to a new shape.
@@ -451,12 +490,11 @@ class GerchbergSaxton:
         slices = [ slice(None,None, old/new) for old,new in zip(a.shape,newshape) ]
         return a[slices]
 
-    def _gs_run(self,phasepup_shft,amp_shft,iterations=20,hio_param=0.3,invalid_pixels=None):
+    def _gs_run(self,amp_shft,iterations=20,hio_param=0.3,invalid_pixels=None):
         """Run the GS algorithm on the input values.
 
         Args:
-            phasepup_shft : (cp.ndarray)
-                Initial guess of phase at pupil after fft-shifting (fft_width,fft_width).
+
             amp_shft : (cp.ndarray)
                 Focal-plane amplitude after fft-shifting (fft_width,fft_width).
             iterations : (int)
@@ -469,12 +507,12 @@ class GerchbergSaxton:
 
         Returns:
             phasepup_shft : (cp.ndarray)
-                Phase estimate from GS iterations (im_width,im_width)
+                Phase estimate from GS iterations (fft_width,fft_width)
         """
         
         amppup_shft = self._pup_shft.copy()
         for it in range(iterations):
-            cplxpup_shft = ((1.+hio_param)*self._pup_shft-hio_param*amppup_shft)*cp.exp(1j*phasepup_shft)    
+            cplxpup_shft = ((1.+hio_param)*self._pup_shft-hio_param*amppup_shft)*cp.exp(1j*self._phasepup_shft)    
             cplxim_shft = cp.fft.fft2(cplxpup_shft)
             
             phaseim_shft = cp.angle(cplxim_shft)
@@ -485,19 +523,18 @@ class GerchbergSaxton:
                 cplxim_shft2[invalid_pixels] = cplxim_shft[invalid_pixels].copy() 
 
             cplxpup_shft2 = cp.fft.ifft2(cplxim_shft2)
-            phasepup_shft = cp.angle(cplxpup_shft2)
+            self._phasepup_shft = cp.angle(cplxpup_shft2)
             amppup_shft = cp.abs(cplxpup_shft2)
-            
-        return phasepup_shft
+        
+        return self._phasepup_shft.copy()
 
-    def compute_phase(self,im,iters=100,init=None,hio_param=0.3,discard_invalid=True):
+    def compute_phase(self,im,iters=100,hio_param=0.3,discard_invalid=True):
         """Compute and return the phase estimated by the Gerchberg-Saxton algorithm,
         given an image.
 
         Args:
             im (np.ndarray): Image to perform GS on.
             iters (int): Number of iterations of GS to perform.
-            init (np/cp.ndarray): Initial guess for the phase (wavelength units).
             hio_param (float): Parameter for the Hybrid Input-Output (HIO) step.
             discard_invalid (bool): If True, discard invalid pixels in WFS image.
 
@@ -509,28 +546,6 @@ class GerchbergSaxton:
         im = im**0.5
         im_shft = cp.fft.fftshift(im)
         
-        # prepare init for GS
-        if init is None: 
-            # if init is not provided then random init
-            init = cp.random.randn(*self._pup_shft.shape)
-        else:
-            # init is provided, so convert to cp.ndarray 
-            # (recalling that cupy === numpy if cupy isn't available)
-            if type(init) is not cp.ndarray:
-                init = cp.array(init)
-            # assume init was provided in wavelength units, so convert to radians
-            init = init * (2*cp.pi/self._wavelength)
-            
-            # if init is not big enough, pad it with the same convention as the pupil padding
-            if not cp.all(cp.r_[init.shape]==self._fft_width):
-                init = cp.pad(init,(self._fft_width-init.shape[0])//2)
-            # fftshift to be self consistent.
-            init = cp.fft.fftshift(init)
-
-        # if an offset was provided in object creation, apply it to the init phase
-        if self._offset_shft is not None:
-            init += self._offset_shft
-
         # check if user wants to discard invalid pixels this time
         if discard_invalid:
             invalid_pixels = self.invalid_pixels
@@ -538,7 +553,7 @@ class GerchbergSaxton:
             invalid_pixels = None
         
         # perform gs algo
-        out_phi_shft = self._gs_run(init,im_shft,iterations=iters,hio_param=hio_param,
+        out_phi_shft = self._gs_run(im_shft,iterations=iters,hio_param=hio_param,
                                     invalid_pixels=invalid_pixels)
         
         # if an offset was provided in object creation, remove it from the GS estimated

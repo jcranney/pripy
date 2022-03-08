@@ -11,9 +11,10 @@ from shesha.supervisor.compassSupervisor import CompassSupervisor
 from shesha.config import ParamConfig
 
 config = ParamConfig("compass_par_tt.py")
-config.p_atmos.set_r0(1.0)
-sup = CompassSupervisor(config)
 nwfs = 0
+config.p_atmos.set_r0(0.5)
+config.p_wfss[nwfs].set_npix(100)
+sup = CompassSupervisor(config)
 niter = 500
 
 
@@ -69,7 +70,7 @@ def get_phase_from_btt_m(x):
 
 get_phase = lambda x : get_phase_from_btt(x)
 
-nstate = 50
+nstate = 200
 nmodes_max = 200
 nmeas  = im_width**2
 
@@ -89,7 +90,7 @@ offset -= offset.mean()
 gs = GerchbergSaxton(pup=pup, wavelength=sup.config.p_wfss[nwfs].get_Lambda(),
                      fft_width=fft_width,im_width=im_width,offset=offset)
 
-gain = 0.1
+gain = 0.05
 leak = 0.99
 
 x_dm = []
@@ -125,8 +126,8 @@ for i in range(niter):
     sup.wfs.raytrace(nwfs,dms=sup.dms)
     x_dm.append(cphi @ (sup.wfs.get_wfs_phase(nwfs)[sup.get_m_pupil()==1]))
     
-    phi0 = gs.compute_phase(y,iters=30,discard_invalid=False,hio_param=0.0)*pup
-    phi0 = gs.compute_phase(y,iters=30,init=cp.array(phi0))*pup
+    #gs.compute_phase(y,iters=30,discard_invalid=False,hio_param=0.0)
+    phi0 = gs.compute_phase(y,iters=100,hio_param=0.25,discard_invalid=False)
     phi1 = -phi0[::-1,::-1]
 
     xk_est0 = cphi @ phi0[pup==1]
