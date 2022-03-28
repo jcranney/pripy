@@ -38,20 +38,11 @@ for i in range(u1.shape[0]):
     sup.rtc.set_command(0,np.roll(u1,i))
     sup.rtc.apply_control(0,comp_voltage=False)
     sup.wfs.raytrace(nwfs,dms=sup.dms)
-    sup.wfs.compute_wfs_image(nwfs,noise=False)
     d_phi_dm.append(sup.wfs.get_wfs_phase(nwfs)[sup.get_m_pupil()==1]/delta)
-    d_h_dm.append(sup.wfs.get_wfs_image(nwfs).flatten()-h0)
 d_phi_dm = np.array(d_phi_dm).T
 c_dm_phi = np.linalg.solve(d_phi_dm.T @ d_phi_dm + 1e-3*np.eye(d_phi_dm.shape[1]), d_phi_dm.T)
-d_h_dm = np.array(d_h_dm).T
-
-ww,vv = np.linalg.eig(d_h_dm.T @ d_h_dm)
-vv = vv[:,np.argsort(np.abs(ww))[::-1]]
 
 sup.reset()
-
-# Would like a modal basis that is determined by WFS sensitivity to that mode. 
-# Maybe the diagonal of the hessian solved at the origin would be a good indicator of sensitivity?
 
 # build BTT model:
 w,v = np.linalg.eig(d_phi_dm.T @ d_phi_dm)
@@ -67,12 +58,7 @@ def get_phase_from_dm(u):
 def get_phase_from_btt(x):
     return get_phase_from_dm(v[:,:x.shape[0]] @ x)
 
-def get_phase_from_weird(x):
-    return get_phase_from_dm(vv[:,:x.shape[0]] @ x)
-
 get_phase = lambda x : get_phase_from_btt(x)
-#get_phase = lambda x : get_phase_from_weird(x)
-#v = vv
 
 nstate = 40
 nmodes_max = 100

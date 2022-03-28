@@ -103,9 +103,15 @@ phase_corr_old = phase_s_0 * 0.0
 x_corr = np.zeros(nmodes)
 
 # uncorrected wavefront phase:
-plt.matshow(phase_s_0-get_phase(x_corr))
+plt.matshow(phase_s_0+get_phase(x_corr))
+plt.title("Uncorrected wavefront phase")
+plt.colorbar()
 
-y = trim_im(phase_to_image(phase_s_0-get_phase(x_corr)),trimmed_width=im_width)
+
+y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width)
+plt.matshow(y)
+plt.title("Initial WFS image")
+plt.colorbar()
 ax = plt.matshow(y)
 plt.colorbar()
 
@@ -116,7 +122,7 @@ for i in tqdm(range(niter),leave=False):
     #### Also, would like to do an intermediate modal projection, rather than
     #### controlling the phase directly.
     y = trim_im(phase_to_image(phase_s_0+phase_corr),trimmed_width=im_width)
-    phi_ff = ff.retrieve_phase(y)
+    phi_ff = ff.compute_phase(y)
     xk_opt = phase_to_modes @ phi_ff[pup_s==1]
     x_corr *= leak
     x_corr += -gain*xk_opt
@@ -139,5 +145,6 @@ plt.ylabel('Error [rad RMS]')
 plt.legend()
 
 # residual wavefront phase:
-plt.matshow(phase_s_0-get_phase(x_corr))
-plt.matshow(y)
+plt.matshow(phase_s_0+get_phase(x_corr))
+plt.title("Residual wavefront phase")
+plt.colorbar()

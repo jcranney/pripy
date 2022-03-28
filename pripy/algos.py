@@ -42,7 +42,7 @@ class FastAndFurious:
     
     Methods
     -------
-    get_phase(p_i)
+    compute_phase(p_i)
         Compute the phase of the wavefront from an image.
     set_diversity_phase(dphi)
         Set the diversity phase.
@@ -86,7 +86,7 @@ class FastAndFurious:
         self._p_de  = None
         self._reset = True
 
-    def retrieve_phase(self,p_i):
+    def compute_phase(self,p_i):
         """ Compute the phase of the wavefront from an image.
 
         Note that the phase in all variables within FF is expected to be in
