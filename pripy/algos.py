@@ -46,6 +46,15 @@ class FastAndFurious:
         Compute the phase of the wavefront from an image.
     set_diversity_phase(dphi)
         Set the diversity phase.
+
+    ### References 
+    # Bos et al., On-sky verification of Fast and Furious focal-plane wavefront sensing: Moving forward toward controlling the island effect at Subaru/SCExAO 
+    https://doi.org/10.1051/0004-6361/202037910
+    (we will use the equation numbers from the paper)
+
+    # Original paper is harder to follow and also has an error in one of the equations:
+    # Keller et al, Extremely fast focal-plane wavefront sensing for extreme adaptive optics, https://arxiv.org/pdf/1207.3273.pdf
+
     """
     def __init__(self, pup: np.ndarray, im_width: int, fft_width: int, 
                 offset: np.ndarray, epsilon: float = 1e-5):
@@ -60,23 +69,17 @@ class FastAndFurious:
         # Pupil in FFT dimensions:
         self._pup = cp.pad(cp.array(pup),(self.fft_width-pup.shape[0])//2) 
         # Offset for (e.g.) centering the image on 2x2 pixels:
-        self._offset = self._pup * cp.exp(1j*cp.pad(cp.array(offset),(self.fft_width-self.pup_width)//2))
-        # Recursive parameters:
-        self._v_d = None
-        self._y_d = None
-        self._p_de = None
-        # Reset flag:
-        self._reset = True
+        self._offset = cp.exp(1j*cp.pad(cp.array(offset),(self.fft_width-self.pup_width)//2))
+    
         # Focal plane complex amplitude (real valued -- assuming symmetry in pupil):
-        self._a = (cp.fft.fftshift(cp.fft.fft2(self._pup*self._offset))).real
-        self._a /= self._pup.sum()
-        # Focal plane intensity:
-        self._a2 = self._a**2
-        # Regularisation parameter:
-        self._epsilon = cp.array(epsilon)
+        self._a = (cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(self._pup*self._offset)))).real / self._pup.sum() # focal plane amplitude
+        self._a2 = self._a**2 # focal plane intensity
+
         # Constants:
-        self._ydenom = 2*self._a**2+self._epsilon
-        self._S = 1 # TODO: estimate this on the fly      
+        self._epsilon = cp.array(epsilon) # regularization parameter
+        self._ydenom = 2*self._a2+self._epsilon # Eq. (5) of Bos (Eq (25) of Keller is a mistake)
+        self._S = 1.0
+        self.reset()
 
     def reset(self):
         """ Reset the FF algorithm/recursive parameters
@@ -104,41 +107,41 @@ class FastAndFurious:
             The estimated phase of the wavefront.
         """
 
-        # rescale the image and pad to the fft size:
+        # pad to the fft size and rescale:
         p_i = cp.pad(cp.array(p_i),(self.fft_width-self.im_width)//2)
         p_i *= self._a2.sum() / p_i.sum()
-        p_i += (1-p_i.max()/self._a2.max())*self._a2
 
         # odd/even decomposition:
         p_io = 0.5*(p_i-p_i[::-1,::-1]) # odd component of image
         p_ie = 0.5*(p_i+p_i[::-1,::-1]) # even component of image
-        
+
         # compute imaginary part of FFT(phase):
-        y_i = self._a*p_io/self._ydenom
+        y_i = self._a*p_io/self._ydenom # Eq (5) of Bos
         
         # compute sign of real part of FFT(phase):
         if self._reset:
-            v_sign = cp.sign(self._a.copy())
+            self._v_sign = cp.sign(self._a.copy())
             self._reset = False
         else:
-            v_sign = cp.sign((self._p_de-p_ie-(self._v_d**2+self._y_d**2+2*y_i*self._y_d))/(2*self._v_d))
-        
+            self._v_sign = cp.sign(self._p_de-p_ie-(self._v_d**2+self._y_d**2+2*y_i*self._y_d))*cp.sign(self._v_d) # Eq (9) of Bos, modified to avoid div by zero.
+            
         # compute abs(real part of FFT(phase)):
-        v_i_abs = cp.sqrt(cp.abs(p_ie-(self._S*self._a2+y_i**2)))
+        v_i_abs = cp.sqrt(cp.abs(p_ie-(self._S*self._a2+y_i**2))) # Eq. (6) of Bos 
 
         # combine to get real part of FFT(phase):
-        v_i = v_i_abs * v_sign
+        v_i = v_i_abs * self._v_sign
 
-        # inverse transform to get phase + negative because I might have a sign 
-        # error somewhere else?:
-        phi = - cp.fft.ifft2(cp.fft.fftshift(v_i+1j*y_i),norm="forward").real
-        
+        # inverse transform to get phase + negative v_i (not sure why!) 
+        scaling_constant = self._pup.sum()/(self._pup.shape[0]*self._pup.shape[1]) # this value "works" for a range of pup_width and fft_width but it is a guess
+        phi = scaling_constant*cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(-v_i-1j*y_i),norm="forward")).real # Eq. (10) of Bos
+
         # save even part of image for next iteration:
         self._p_de = p_ie.copy()
 
         # return phase estimate on pupil plane support:
         phi =  phi[self.fft_width//2-self.pup_width//2:self.fft_width//2+self.pup_width//2,
                    self.fft_width//2-self.pup_width//2:self.fft_width//2+self.pup_width//2]
+        
         # return numpy array regardless of if using cupy or not:
         if hasattr(phi,"get"):
             return phi.get()
@@ -163,9 +166,9 @@ class FastAndFurious:
         dphi_big = cp.pad(cp.array(dphi),(self.fft_width-self.pup_width)//2)
         dphi_big_o = (dphi_big-dphi_big[::-1,::-1])*0.5
         dphi_big_e = (dphi_big+dphi_big[::-1,::-1])*0.5
-        self._y_d = cp.fft.fftshift(cp.fft.ifft2(dphi_big_o)).imag
-        self._v_d = cp.fft.fftshift(cp.fft.ifft2(dphi_big_e)).real
-
+        self._y_d = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(dphi_big_o))).imag
+        self._v_d = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(dphi_big_e))).real
+        
 class MHEStatic:
     """Moving Horizon Estimator with a static phase assumption (i.e., A=eye)
     """

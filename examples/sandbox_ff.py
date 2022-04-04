@@ -90,7 +90,7 @@ epsilon = np.pad(np.ones([im_width,im_width])*1e-5,(fft_width-im_width)//2,mode=
 ff = FastAndFurious(pup=pup_s,fft_width=pup_f.shape[0],
                     im_width=im_width,offset=phase_offset,epsilon=epsilon)
 
-gain = 0.05
+gain = 0.5
 leak = 0.99
 
 # This cell uses just the constant x over nbuffer
