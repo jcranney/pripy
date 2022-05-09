@@ -92,104 +92,6 @@ class TaylorHModel:
         else:
             return out
 
-    def ceo_build_dnys(self,gmt,src,imgr):
-        n_px_fft = imgr.DFT_osf*imgr.N_PX_PUPIL
-        pup = src.amplitude.host()
-        xx,yy = np.meshgrid(np.arange(pup.shape[0]),np.arange(pup.shape[0]))
-
-        pup_mask = pup==1
-
-        phi = pup.copy()
-
-        dft_matrix = la.dft(n_px_fft)
-        dft_matrix = np.concatenate([dft_matrix[n_px_fft//2:,:],dft_matrix[:n_px_fft//2,]],axis=0)
-        dft_matrix = dft_matrix[:,:src.phase.shape[0]]
-        dft_matrix = dft_matrix[(n_px_fft-imgr.N_PX_IMAGE)//2+1:(n_px_fft+imgr.N_PX_IMAGE)//2+1,:]
-        dft_matrix = np.kron(dft_matrix,dft_matrix)
-        dft_matrix = dft_matrix[:,pup_mask.flatten()]
-
-        ~gmt
-
-        mode_to_phase = np.zeros([pup_mask.sum(),self._nstate])
-
-        state = gmt.state
-        x = state["M1"]["Txyz"][:,2]
-        x *= 0.0
-        gmt^=state
-        ~imgr
-        +src
-        
-        for i in range(self._nstate):
-            x *= 0.0
-            delta = 1e-7
-            x[i] = delta
-            gmt^=state
-            +src
-            phi = src.phase.host()
-            mode_to_phase[:,i] = phi[pup_mask]/delta
-
-        wavelength = src.wavelength
-        self.wavelength = wavelength
-
-        g0 = np.exp((1j*2*np.pi*(xx+yy)/pup.shape[0]/4))[pup_mask]
-        self.g = lambda x: np.exp((1j*2*np.pi)*(mode_to_phase@x/wavelength+g0))
-        self.h_true = lambda x: np.abs(dft_matrix @ self.g(x))**2
-        self._mode_to_phase = mode_to_phase        
-        self._dft_matrix    = dft_matrix
-
-        d0h = np.abs(dft_matrix @ g0)**2
-        self.set_dny(d0h,0)
-        if self._order < 1:
-            return
-        
-        d1h = np.zeros([imgr.N_PX_IMAGE**2,self._nstate])
-        for ell1 in range(self._nstate):
-            m_ell_ = mode_to_phase[:,ell1]
-            d1h[:,ell1] = 2*(2*np.pi/wavelength)*((-1j)*((dft_matrix@(g0*m_ell_))).conj()*(dft_matrix@g0)).real
-        self.set_dny(d1h,1)
-        if self._order < 2:
-            return
-
-        d2h = np.zeros([imgr.N_PX_IMAGE**2,self._nstate,self._nstate])
-        for ell1 in range(self._nstate):
-            for ell2 in range(ell1+1):
-                m_ell_1 = mode_to_phase[:,ell1]
-                m_ell_2 = mode_to_phase[:,ell2]
-                tmp = 2*((-1j*2*np.pi/wavelength)**2*(
-                            (dft_matrix@(g0*m_ell_1*m_ell_2)).conj()*(dft_matrix@g0)
-                            - (dft_matrix@(g0*m_ell_1)).conj()*(dft_matrix@(g0*m_ell_2))
-                        )).real
-                d2h[:,ell1,ell2] = tmp
-                d2h[:,ell2,ell1] = tmp
-        self.set_dny(d2h,2)
-        if self._order < 3:
-            return
-            
-        d3h = np.zeros([imgr.N_PX_IMAGE**2,self._nstate,self._nstate,self._nstate])
-        for ell1 in range(self._nstate):
-            for ell2 in range(ell1+1):
-                for ell3 in range(ell2+1):
-                    m_ell_1 = mode_to_phase[:,ell1]
-                    m_ell_2 = mode_to_phase[:,ell2]
-                    m_ell_3 = mode_to_phase[:,ell3]
-                    tmp = 2*((-1j*2*np.pi/wavelength)**3*(
-                            (dft_matrix@(g0*m_ell_1*m_ell_2*m_ell_3)).conj()*(dft_matrix@g0)
-                            - (dft_matrix@(g0*m_ell_1*m_ell_2)).conj()*(dft_matrix@(g0*m_ell_3))
-                            - (dft_matrix@(g0*m_ell_1*m_ell_3)).conj()*(dft_matrix@(g0*m_ell_2))
-                            - (dft_matrix@(g0*m_ell_2*m_ell_3)).conj()*(dft_matrix@(g0*m_ell_1))
-                        )).real
-                    d3h[:,ell1,ell2,ell3] = tmp
-                    d3h[:,ell1,ell3,ell2] = tmp
-                    d3h[:,ell2,ell1,ell3] = tmp
-                    d3h[:,ell2,ell3,ell1] = tmp
-                    d3h[:,ell3,ell1,ell2] = tmp
-                    d3h[:,ell3,ell2,ell1] = tmp
-        self.set_dny(d3h,3)
-        if self._order < 4:
-            return
-        else:
-            raise ValueError("maximum taylor order implemented is 3")
-    
     def exact_jacobian(self,x):
         if type(x) is np.ndarray:
             CPU = True
@@ -260,7 +162,7 @@ class TaylorHModel:
         nstate = self._nstate
         nmeas = self._nmeas
 
-        dft_matrix = la.dft(fft_width,scale=None)
+        dft_matrix = la.dft(fft_width,scale="sqrtn")
         dft_matrix = np.concatenate([dft_matrix[fft_width//2:,:],dft_matrix[:fft_width//2,]],axis=0)
         dft_matrix = dft_matrix[:,:pup_width]
         dft_matrix = dft_matrix[fft_width//2-im_width//2:fft_width//2+im_width//2,:]

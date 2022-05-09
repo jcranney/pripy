@@ -85,19 +85,19 @@ h_taylor = TaylorHModel(3,nmeas,nstate)
 h_taylor.general_build_dnys(pup_s,im_width,fft_width,get_phase,phase_offset,(np.pi*2))
 
 nbuffer = 5
-cost_scaling = 1e-9
-Sigma_x = 1e6*0.05*np.eye(nstate)
-Sigma_w = 1e6*1e-7*np.eye(h_taylor.dny[0].shape[0])
+cost_scaling = 1.0
+Sigma_x = 1*np.eye(nstate)
+Sigma_w = 1e-5*np.eye(h_taylor.dny[0].shape[0])
 A_mat = np.eye(nstate)*0.9999
 
 #mve = MHE(nstate, nmeas, nbuffer, noise_cov=Sigma_w, state_cov=Sigma_x,
 #            state_matrix=A_mat, h_eval=h_taylor.eval, h_jac=h_taylor.jacobian, 
 #            h_hess=None, cost_scaling=cost_scaling)
 mve = MHEStatic(nstate, nmeas, nbuffer, noise_cov=Sigma_w, state_cov=Sigma_x,
-            state_matrix=A_mat, h_eval=h_taylor.eval, h_jac=h_taylor.jacobian, 
+            h_eval=h_taylor.eval, h_jac=h_taylor.jacobian, 
             h_hess=None, cost_scaling=cost_scaling)
 
-gain = 0.5
+gain = 0.3
 leak = 0.99
 
 # This cell uses just the constant x over nbuffer
@@ -110,30 +110,36 @@ yd = []
 x_corr = np.zeros(nstate)
 
 # uncorrected wavefront phase:
-plt.matshow(phase_s_0-get_phase(x_corr))
+plt.matshow(phase_s_0+get_phase(x_corr))
+plt.title("Uncorrected wavefront phase")
+plt.colorbar()
 
-y = trim_im(phase_to_image(phase_s_0-get_phase(x_corr)),trimmed_width=im_width).flatten()
+y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width).flatten()
+plt.matshow(y.reshape((im_width,im_width)))
+plt.title("Initial WFS image")
+plt.colorbar()
 ax = plt.matshow(y.reshape((im_width,im_width)))
 plt.colorbar()
 
 err = []
 costs = []
 for i in tqdm(range(niter),leave=False):
-    y = trim_im(phase_to_image(phase_s_0-get_phase(x_corr)),trimmed_width=im_width).flatten()
+    y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width).flatten()
     yd.append(y/y.sum()*h_taylor.dny[0].get().sum())
-    x_dm.append(-x_corr)
+    x_dm.append(x_corr)
     if i >= nbuffer:
         ydk   = np.array(yd[-nbuffer:])
         xk_dm = np.array(x_dm[-nbuffer:]).flatten()
         #x_0 = -np.tile(xk_dm[-nstate:],(nbuffer,1)).flatten()
-        x_0 = -xk_dm[-nstate:]
+        x_0 = -xk_dm[-nstate:]*0.0
+        #errhere
         xk_opt = mve.get_estimate(x_0,xk_dm,ydk)
-        x_corr    = leak*x_corr + gain*((xk_opt+xk_dm[-nstate:]))
+        x_corr    = (1-gain)*x_corr - gain*(xk_opt)
         costs.append(mve._xopt["fun"])
-        print(mve._xopt)
+        #print(mve._xopt)
     ax.set_data(y.reshape((im_width,im_width)))
     ax.set_clim([y.min(),y.max()])
-    err.append((phase_s_0-get_phase(x_corr))[pup_s==1].std())
+    err.append((phase_s_0+get_phase(x_corr))[pup_s==1].std())
     plt.title(f"Iteration {i:d}\nError: {err[-1]:0.3f}")
     plt.savefig("tame_%03d.png"%i)
     
@@ -146,5 +152,6 @@ plt.ylabel('Error [rad RMS]')
 plt.legend()
 
 # residual wavefront phase:
-plt.matshow(phase_s_0-get_phase(x_corr))
-plt.matshow(y.reshape([20,20]))
+plt.matshow(phase_s_0+get_phase(x_corr))
+plt.title("Residual wavefront phase")
+plt.colorbar()
