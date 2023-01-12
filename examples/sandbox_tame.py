@@ -111,21 +111,20 @@ x_corr = np.zeros(nstate)
 
 # uncorrected wavefront phase:
 plt.matshow(phase_s_0+get_phase(x_corr))
-plt.title("Uncorrected wavefront phase")
 plt.colorbar()
+plt.title("Initial Wavefront")
 
+# uncorrected image
 y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width).flatten()
 plt.matshow(y.reshape((im_width,im_width)))
-plt.title("Initial WFS image")
 plt.colorbar()
-ax = plt.matshow(y.reshape((im_width,im_width)))
-plt.colorbar()
+plt.title("Initial Image")
 
 err = []
 costs = []
 for i in tqdm(range(niter),leave=False):
     y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width).flatten()
-    yd.append(y/y.sum()*h_taylor.dny[0].get().sum())
+    yd.append(y/y.sum()*h_taylor.dny[0].sum())
     x_dm.append(x_corr)
     if i >= nbuffer:
         ydk   = np.array(yd[-nbuffer:])
@@ -137,11 +136,7 @@ for i in tqdm(range(niter),leave=False):
         x_corr    = (1-gain)*x_corr - gain*(xk_opt)
         costs.append(mve._xopt["fun"])
         #print(mve._xopt)
-    ax.set_data(y.reshape((im_width,im_width)))
-    ax.set_clim([y.min(),y.max()])
     err.append((phase_s_0+get_phase(x_corr))[pup_s==1].std())
-    plt.title(f"Iteration {i:d}\nError: {err[-1]:0.3f}")
-    plt.savefig("tame_%03d.png"%i)
     
 # error over time
 plt.figure()
@@ -153,5 +148,10 @@ plt.legend()
 
 # residual wavefront phase:
 plt.matshow(phase_s_0+get_phase(x_corr))
-plt.title("Residual wavefront phase")
+plt.title("Final Wavefront")
 plt.colorbar()
+
+# residual image
+plt.matshow(y.reshape([20,20]))
+plt.colorbar()
+plt.title("Final Image")
