@@ -4,7 +4,7 @@ Usage: test_slm.py [options]
 
     -s, --slm               Use the SLM
     -m, --monitor <id>      The monitor to use, -1 means virtual SLM [default: -1]
-    -r, --radius <pixels>   Radius of pupil to use in pixels [default: 205]
+    -r, --radius <pixels>   Radius of pupil to use in pixels [default: 300]
     -x, --xoffset <pixels>  x offset in pixels [default: 0]
     -y, --yoffset <pixels>  y offset in pixels [default: 0]
 """
@@ -17,6 +17,10 @@ from math import factorial
 import torch as t
 from pointgrey_handler import CameraHandler
 import time
+import matplotlib.pyplot as plt
+from slm_make_gmt_pupil import make_phimat,make_pupil
+
+plt.ion()
 
 class Controller:
     u = np.r_[0.0,0.0]
@@ -48,7 +52,7 @@ class Controller:
         cog = self.cog(frame)
         self.u = 0.999 * self.u - 0.1 * self.cog_gain @ cog
         print(self.u)
-        self.set_command(self.u )#- self.cog_gain @ self.cog_ref)
+        self.set_command(self.u - self.cog_gain @ self.cog_ref)
         self.apply_command()
     
     def cog(self,frame):
@@ -90,7 +94,7 @@ class SLM(slmpy.SLMdisplay):
     """
 
     def __init__(self,*args,monitor=1,wrap=False,x0=0,y0=0,
-        mini_res_x=320,mini_res_y=200,mask=None,phimat=None,**kwargs):
+        mini_res_x=800,mini_res_y=600,mask=None,phimat=None,**kwargs):
         """initialise SLM object
         
         Args:
@@ -111,8 +115,6 @@ class SLM(slmpy.SLMdisplay):
             self._virtual = True
             self._res_x, self._res_y = (mini_res_x, mini_res_y)
         self._wrap  = wrap
-        x0 = self._res_x//2-x0
-        y0 = self._res_y//2-y0
         yy,xx = np.mgrid[:self._res_y,:self._res_x]*1.0
         xx -= x0
         yy -= y0
@@ -199,33 +201,34 @@ if __name__ == "__main__":
     doc = docopt(__doc__)
     im_width = 200
     ctrl = Controller(im_width=im_width)
-    cam  = CameraHandler(width=im_width,height=im_width,offset_x=414,offset_y=448)
 
     monitor_id = int(doc["--monitor"])
     radius = int(doc["--radius"])
     xoffset = int(doc["--xoffset"])
     yoffset = int(doc["--yoffset"])
 
-    slm = SLM(monitor=monitor_id,isImageLock=True,wrap=True,
-                x0=-53.5,y0=15.5)
+    slm = SLM(monitor=monitor_id,isImageLock=True,wrap=True)
 
-    def set_command(slm,u):
-        slm.clear_phase()
-        # cheeky create mask trick
-        slm.add_poly(2,0,1)
-        slm.add_poly(0,2,1)
-        mask = slm._image < (radius/slm._res_y)**2
-        slm.set_mask(mask)
-        slm.clear_phase()
-        slm.add_poly(0,0,0.5)
-        slm.add_poly(0,1,u[0])
-        slm.add_poly(1,0,u[1])
-        slm.apply_mask(mask)
+    full_width = 600 # full width of GMT pupil across long axis
+    seg_diam = full_width/(3+0.359/8.4*2) # segment diameter in pixels
     
-    def apply_command(slm):
-        slm.update()
-    
-    ctrl.set_command = lambda u : set_command(slm,u)
-    ctrl.apply_command = lambda : apply_command(slm)
+    phimat = make_phimat(x0=450,y0=285,x_res=slm._res_x,y_res=slm._res_y,
+                        seg_diam=seg_diam)
+    slm.set_phimat(phimat=phimat)
 
-    cam.main(ctrl.step)
+    cam  = CameraHandler(width=im_width,height=im_width,offset_x=420,offset_y=424)
+
+    x = np.zeros(7,dtype=np.float32)
+    with cam.FrameGrabber(cam) as fg:
+        for xi in range(7):
+            x    *= 0.0
+            x[xi] = 0.5
+            slm.clear_phase()
+            slm.add_phimat_phase(x)
+            slm.update()
+            cv2.waitKey(200)
+            frame = np.mean(fg.grab(50),axis=0)
+            # convert image8bit to mini display format
+            cam_image = cv2.cvtColor(np.uint8(frame), cv2.COLOR_GRAY2BGR)
+            # display image on window
+            cv2.imshow('Cam img',cam_image)

@@ -17,6 +17,8 @@ from math import factorial
 import torch as t
 from pointgrey_handler import CameraHandler
 import time
+import matplotlib.pyplot as plt
+plt.ion()
 
 class Controller:
     u = np.r_[0.0,0.0]
@@ -48,7 +50,7 @@ class Controller:
         cog = self.cog(frame)
         self.u = 0.999 * self.u - 0.1 * self.cog_gain @ cog
         print(self.u)
-        self.set_command(self.u )#- self.cog_gain @ self.cog_ref)
+        self.set_command(self.u - self.cog_gain @ self.cog_ref)
         self.apply_command()
     
     def cog(self,frame):
@@ -199,7 +201,7 @@ if __name__ == "__main__":
     doc = docopt(__doc__)
     im_width = 200
     ctrl = Controller(im_width=im_width)
-    cam  = CameraHandler(width=im_width,height=im_width,offset_x=414,offset_y=448)
+    cam  = CameraHandler(width=im_width,height=im_width,offset_x=420,offset_y=424)
 
     monitor_id = int(doc["--monitor"])
     radius = int(doc["--radius"])
@@ -208,6 +210,70 @@ if __name__ == "__main__":
 
     slm = SLM(monitor=monitor_id,isImageLock=True,wrap=True,
                 x0=-53.5,y0=15.5)
+
+    #  plan:
+    # sweep a vertical bar from left to right, and observe the peak intensity of the image
+    # as a function of sweep position, then do the same for a horizontal bar from top to
+    # bottom. This will give us the boundaries of the pupil, which determine the width and
+    # centre position of the segmented pupil.
+
+    def vertical_bar(slm,pos,width=30):
+        slm.clear_phase()
+        yy,xx = np.mgrid[:slm._res_y,:slm._res_x]
+        zz = ((xx < (pos + width/2)) & (xx > (pos - width/2)))*0.5
+        slm._image += zz
+        slm.update()
+    
+    def horizontal_bar(slm,pos,width=30):
+        slm.clear_phase()
+        yy,xx = np.mgrid[:slm._res_y,:slm._res_x]
+        zz = ((yy < (pos + width/2)) & (yy > (pos - width/2)))*0.5
+        slm._image += zz
+        slm.update()
+    xpos = []
+    intensity = []
+    with cam.FrameGrabber(cam) as fg:
+        for x in range(slm._res_x)[::10]:
+            vertical_bar(slm,x)
+            cv2.waitKey(100)
+            frame = np.mean(fg.grab(50),axis=0)  
+            print(frame.max())
+            # convert image8bit to mini display format
+            cam_image = cv2.cvtColor(np.uint8(frame), cv2.COLOR_GRAY2BGR)
+            # display image on window
+            cv2.imshow('Cam img',cam_image)
+            xpos.append(x)
+            intensity.append(frame.max())
+    
+    print("finished col sweep")
+    np.save("column_sweep.npy",np.c_[xpos,intensity])
+    print("saved col sweep")
+    #plt.figure()
+    #plt.plot(xpos,intensity)
+    
+    ypos = []
+    intensity = []
+    with cam.FrameGrabber(cam) as fg:
+        for y in range(slm._res_y)[::10]:
+            horizontal_bar(slm,y)
+            cv2.waitKey(100)
+            frame = np.mean(fg.grab(50),axis=0)  
+            print(frame.max())
+            # convert image8bit to mini display format
+            cam_image = cv2.cvtColor(np.uint8(frame), cv2.COLOR_GRAY2BGR)
+            # display image on window
+            cv2.imshow('Cam img',cam_image)
+            ypos.append(y)
+            intensity.append(frame.max())
+    
+    print("finished row sweep")
+    np.save("row_sweep.npy",np.c_[ypos,intensity])
+    print("saved row sweep")
+    #plt.figure()
+    #plt.plot(ypos,intensity)
+
+    
+    """
 
     def set_command(slm,u):
         slm.clear_phase()
@@ -229,3 +295,4 @@ if __name__ == "__main__":
     ctrl.apply_command = lambda : apply_command(slm)
 
     cam.main(ctrl.step)
+    """
