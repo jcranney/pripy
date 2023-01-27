@@ -15,6 +15,13 @@ def make_phimat(x0,y0,x_res,y_res,seg_diam):
         zz[1+i,:,:] = (((xx-x0-radial_offset*np.cos(theta))**2+(yy-y0-radial_offset*np.sin(theta))**2)**0.5 < seg_diam/2)*1.0
     return zz
 
+def make_tt_phimat(x0,y0,x_res,y_res,seg_diam):
+    yy,xx = np.mgrid[:y_res,:x_res]*1.0
+    zz = np.tile(xx[None,:,:]*0,[2,1,1])
+    zz[0,:,:] = xx/1000
+    zz[1,:,:] = yy/1000
+    return zz
+
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
     plt.ion()

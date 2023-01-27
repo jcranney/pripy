@@ -520,7 +520,8 @@ class GerchbergSaxton:
             
             phaseim_shft = cp.angle(cplxim_shft)
             ampim_shft = cp.abs(cplxim_shft)
-            
+            self.debug = ampim_shft
+            #errhere
             cplxim_shft2 = ((1.+hio_param)*amp_shft-hio_param*ampim_shft)*cp.exp(1j*phaseim_shft)
             if invalid_pixels is not None:
                 cplxim_shft2[invalid_pixels] = cplxim_shft[invalid_pixels].copy() 
@@ -544,7 +545,7 @@ class GerchbergSaxton:
         Returns:
             np.ndarray: Phase estimate (in wavelength units).
         """
-        im = cp.array(im)*(self._scf/im.sum())
+        im = cp.array(im) # *(self._scf/im.sum())
         im = cp.pad(im,(self._fft_width-self._im_width)//2)
         im = im**0.5
         im_shft = cp.fft.fftshift(im)

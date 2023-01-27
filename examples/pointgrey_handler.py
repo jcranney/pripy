@@ -27,16 +27,45 @@
 import sys
 import keyboard
 import PySpin
+import numpy as np
+
+class FakeCameraHandler:
+
+    def __init__(self,offset_x=900,offset_y=900,width=200,height=200,exposure=10000,gain=0):
+        self._cam_offset_x  = offset_x
+        self._cam_offset_y  = offset_y
+        self._cam_width     = width
+        self._cam_height    = height
+        self._exposure_time = exposure
+        self._gain          = gain
+    
+    class FrameGrabber:
+        def __init__(self,cam_obj):
+            self._cam_obj = cam_obj
+
+        def __enter__(self):
+            return self
+
+        def grab(self,nframes=1):
+            frames = []
+            for _ in range(nframes):
+                frames.append(np.random.rand(*[self._cam_obj._cam_width,self._cam_obj._cam_height])*2**16)
+            return frames
+
+        def __exit__(self,*args):
+            pass
 
 class CameraHandler:
     
     continue_recording = True
 
-    def __init__(self,offset_x=900,offset_y=900,width=200,height=200):
-        self._cam_offset_x = offset_x
-        self._cam_offset_y = offset_y
-        self._cam_width    = width
-        self._cam_height   = height
+    def __init__(self,offset_x=900,offset_y=900,width=200,height=200,exposure=10000,gain=0):
+        self._cam_offset_x  = offset_x
+        self._cam_offset_y  = offset_y
+        self._cam_width     = width
+        self._cam_height    = height
+        self._exposure_time = exposure
+        self._gain          = gain
 
     def handle_close(self,evt):
         """
@@ -56,17 +85,37 @@ class CameraHandler:
         :return: True if successful, False otherwise.
         :rtype: bool
         """
+        node_exposure_auto = PySpin.CEnumerationPtr(nodemap.GetNode('ExposureAuto'))
+        if not PySpin.IsReadable(node_exposure_auto) or not PySpin.IsWritable(node_exposure_auto):
+            return False
+
+        exposure_auto_off = node_exposure_auto.GetEntryByName('Off')
+        if not PySpin.IsReadable(exposure_auto_off):
+            return False
+
+        node_exposure_auto.SetIntValue(exposure_auto_off.GetValue())
+
+        node_gain_auto = PySpin.CEnumerationPtr(nodemap.GetNode('GainAuto'))
+        if not PySpin.IsReadable(node_gain_auto) or not PySpin.IsWritable(node_gain_auto):
+            return False
+
+        gain_auto_off = node_gain_auto.GetEntryByName('Off')
+        if not PySpin.IsReadable(gain_auto_off):
+            return False
+
+        node_gain_auto.SetIntValue(gain_auto_off.GetValue())
+        
         node_pixel_format = PySpin.CEnumerationPtr(nodemap.GetNode('PixelFormat'))
         if PySpin.IsReadable(node_pixel_format) and PySpin.IsWritable(node_pixel_format):
             # Retrieve the desired entry node from the enumeration node
-            node_pixel_format_mono8 = PySpin.CEnumEntryPtr(node_pixel_format.GetEntryByName('Mono8'))
-            if PySpin.IsReadable(node_pixel_format_mono8):
+            node_pixel_format_mono16 = PySpin.CEnumEntryPtr(node_pixel_format.GetEntryByName('Mono16'))
+            if PySpin.IsReadable(node_pixel_format_mono16):
                 # Retrieve the integer value from the entry node
-                pixel_format_mono8 = node_pixel_format_mono8.GetValue()
+                pixel_format_mono16 = node_pixel_format_mono16.GetValue()
                 # Set integer as new value for enumeration node
-                node_pixel_format.SetIntValue(pixel_format_mono8)
+                node_pixel_format.SetIntValue(pixel_format_mono16)
             else:
-                print('Pixel format mono 8 not readable...')
+                print('Pixel format mono 16 not readable...')
         else:
             print('Pixel format not readable or writable...')
 
@@ -93,6 +142,30 @@ class CameraHandler:
             node_offset_y.SetValue(self._cam_offset_y)
         else:
             print('Offset Y not readable or writable...')
+        
+        # Set exposure time; exposure time recorded in microseconds
+        node_exposure_time = PySpin.CFloatPtr(nodemap.GetNode('ExposureTime'))
+        if not PySpin.IsReadable(node_exposure_time) or not PySpin.IsWritable(node_exposure_time):
+            return False
+
+        exposure_time_max = node_exposure_time.GetMax()
+
+        if self._exposure_time > exposure_time_max:
+            self._exposure_time = exposure_time_max
+
+        node_exposure_time.SetValue(self._exposure_time)
+
+        # Set gain; gain recorded in decibels
+        node_gain = PySpin.CFloatPtr(nodemap.GetNode('Gain'))
+        if not PySpin.IsReadable(node_gain) or not PySpin.IsWritable(node_gain):
+            return False
+
+        gain_max = node_gain.GetMax()
+
+        if self._gain > gain_max:
+            self._gain = gain_max
+
+        node_gain.SetValue(self._gain)
         
         return True
 
@@ -299,69 +372,6 @@ class CameraHandler:
             print('Error: %s' % ex)
             result = False
 
-        return result
-
-
-    def main(self,callback=None):
-        """
-        Example entry point; notice the volume of data that the logging event handler
-        prints out on debug despite the fact that very little really happens in this
-        example. Because of this, it may be better to have the logger set to lower
-        level in order to provide a more concise, focused log.
-
-        :return: True if successful, False otherwise.
-        :rtype: bool
-        """
-        self._callback_function = callback
-        result = True
-
-        # Retrieve singleton reference to system object
-        system = PySpin.System.GetInstance()
-
-        # Get current library version
-        version = system.GetLibraryVersion()
-        print('Library version: %d.%d.%d.%d' % (version.major, version.minor, version.type, version.build))
-
-        # Retrieve list of cameras from the system
-        cam_list = system.GetCameras()
-
-        num_cameras = cam_list.GetSize()
-
-        print('Number of cameras detected: %d' % num_cameras)
-
-        # Finish if there are no cameras
-        if num_cameras == 0:
-
-            # Clear camera list before releasing system
-            cam_list.Clear()
-
-            # Release system instance
-            system.ReleaseInstance()
-
-            print('Not enough cameras!')
-            input('Done! Press Enter to exit...')
-            return False
-
-        # Run example on each camera
-        for i, cam in enumerate(cam_list):
-
-            print('Running example for camera %d...' % i)
-            result &= self.run_single_camera(cam)
-            print('Camera %d example complete... \n' % i)
-
-        # Release reference to camera
-        # NOTE: Unlike the C++ examples, we cannot rely on pointer objects being automatically
-        # cleaned up when going out of scope.
-        # The usage of del is preferred to assigning the variable to None.
-        del cam
-
-        # Clear camera list before releasing system
-        cam_list.Clear()
-
-        # Release system instance
-        system.ReleaseInstance()
-
-        input('Done! Press Enter to exit...')
         return result
 
     class FrameGrabber:

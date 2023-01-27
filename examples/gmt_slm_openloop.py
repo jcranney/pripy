@@ -199,7 +199,7 @@ if __name__ == "__main__":
     doc = docopt(__doc__)
     im_width = 200
     ctrl = Controller(im_width=im_width)
-    cam  = CameraHandler(width=im_width,height=im_width,offset_x=414,offset_y=448)
+    cam  = CameraHandler(width=im_width,height=im_width,offset_x=414,offset_y=500)
 
     monitor_id = int(doc["--monitor"])
     radius = int(doc["--radius"])
