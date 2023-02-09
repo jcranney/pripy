@@ -46,7 +46,10 @@ class Controller:
                                t.arange(pup_width)/(pup_width-1)-0.5)
     
         # offset to get the image centred on 2x2 pixels
-        self.phase_offset = -(xx_s+yy_s)*(pup_width-1)*2*t.pi/fft_width/2
+        if self.im_width % 2 == 0:
+            self.phase_offset = -(xx_s+yy_s)*(pup_width-1)*2*t.pi/fft_width/2
+        else:
+            self.phase_offset = xx_s*0.0
         self.get_phase = get_phase
         self.nstate = nstate
         self.nmeas  = im_width**2
@@ -80,10 +83,16 @@ class Controller:
             ndarray: trimmed image
         """
         im = rebin(im,self.rebin_factor)
-        return im[
-            im.shape[0]//2-self.im_width//2:im.shape[0]//2+self.im_width//2,
-            im.shape[1]//2-self.im_width//2:im.shape[1]//2+self.im_width//2
-            ]
+        if self.im_width % 2 == 0: # even
+            return im[
+                im.shape[0]//2-self.im_width//2:im.shape[0]//2+self.im_width//2,
+                im.shape[1]//2-self.im_width//2:im.shape[1]//2+self.im_width//2
+                ]
+        else: # odd
+            return im[
+                im.shape[0]//2-self.im_width//2:im.shape[0]//2+self.im_width//2+1,
+                im.shape[1]//2-self.im_width//2:im.shape[1]//2+self.im_width//2+1
+                ]
 
     def h_func(self,x):
         "takes state, returns image"
@@ -422,21 +431,49 @@ if __name__ == "__main__":
 
     #stophere
     #dark = 600
+    sigma_tt = 10.0 # units are tbd
+    sigma_piston = 1.0 # units are tbd
+    F_matrix = np.block([[np.eye(2),np.zeros([2,7])],[np.zeros([7,2]),np.eye(7)-np.ones([7,7])/7]])
+    sigma_x = np.concatenate([
+            np.ones(2)*sigma_tt,
+            np.ones(7)*sigma_piston
+            ])
+    Sigma_x = F_matrix @ np.diag(sigma_x) @ F_matrix.T
+    a_matrix = 0.99*np.ones(9)
+    A_matrix = np.diag(a_matrix) @ F_matrix
+    Sigma_v = Sigma_x - A_matrix @ Sigma_x @ A_matrix.T
+    w,v = np.linalg.eigh(Sigma_v)
+    v = v[:,w>1e-9]
+    w = w[w>1e-9]
+    B_matrix = v @ np.diag(w**0.5)
+    w,v = np.linalg.eigh(Sigma_x)
+    v = v[:,w>1e-9]
+    w = w[w>1e-9]
+    S_matrix = v @ np.diag(w**0.5)
 
-    disturbance = np.r_[10,-3,1,-1,1,-1,1,-1,1]*0.3
-    disturbance[2:] -= disturbance[2:].mean()
+    disturbance = S_matrix @  np.random.randn(S_matrix.shape[1])
+
+    #disturbance = np.r_[10,-3,1,-1,1,-1,1,-1,1]*0.3
+    #disturbance[2:] -= disturbance[2:].mean()
     fig,ax = plt.subplots(figsize=[4,4])
     ax.imshow(y_test_cam)
     # run control loop
     frames = []
+    x = []
+    u = []
     with cam.FrameGrabber(cam) as fg:
         for it in tqdm(range(500)):
+            # update disturbance
+            disturbance = a_matrix * disturbance + B_matrix @ np.random.randn(B_matrix.shape[1])
             # grab a frame
             frame = (rebin(fg.grab(1)[0]*1.0,cam_im_rebin)-cam_dark_frame)*flux_ratio
             ax.images[0].set_data(frame)
             frames.append(frame)
             # update command
             ctrl.update(frame)
+
+            x.append(disturbance.copy())
+            u.append(ctrl.x_corr*scale)
 
             # apply command
             slm.clear_phase()
@@ -451,4 +488,7 @@ if __name__ == "__main__":
             #print(frame.max())
             # wait a bit
             cv2.waitKey(100)
+
     np.save("frames.npy",frames)
+    np.save("x.npy",np.array(x))
+    np.save("u.npy",np.array(u))
