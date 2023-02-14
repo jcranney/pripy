@@ -4,6 +4,9 @@ Usage: test_slm.py [options]
 
     -s, --slm               Use the SLM
     -m, --monitor <id>      The monitor to use, -1 means virtual SLM [default: -1]
+    -r, --radius <pixels>   Radius of pupil to use in pixels [default: 300]
+    -x, --xoffset <pixels>  x offset in pixels [default: 0]
+    -y, --yoffset <pixels>  y offset in pixels [default: 0]
 """
 
 from docopt import docopt
@@ -16,10 +19,9 @@ t.set_num_threads(6)
 from pointgrey_handler import CameraHandler as CameraHandler
 import time
 import matplotlib.pyplot as plt
-from slm_make_gmt_pupil import make_phimat,make_pupil,make_tt_phimat,make_foc_phimat
+from slm_make_gmt_pupil import make_phimat,make_pupil,make_tt_phimat
 from tqdm import tqdm
 from scipy.signal import fftconvolve
-from scipy.linalg import block_diag
 
 plt.ion()
 
@@ -104,7 +106,7 @@ class Controller:
         self.x = t.zeros([self.nstate],requires_grad=True)
         self.optimizer = t.optim.SGD([self.x],lr=0.01)
 
-        self.gain = 0.3
+        self.gain = 0.4
         self.leak = 0.995
 
         self.x_dm = t.zeros([self.nbuffer,self.nstate])
@@ -116,18 +118,17 @@ class Controller:
     def cost_ls(self,x,u,y):
         z = t.zeros(self.nbuffer*self.nmeas)
         for n in range(self.nbuffer):
-            tmp = y[n]-self.h_func(x+u[n])[self.im_mask==1]
+            tmp = y[n]-self.h_func(x+u[n]).flatten()
             z[n*self.nmeas:(n+1)*self.nmeas] = t.einsum("i,ij->j",tmp,self.Sigma_w_inv_fact)
-        return t.concat([z,1e0*x],dim=0)
-        #return z
+        #return t.concat([z,1e-4*x],dim=0)
+        return z
 
     def update(self,frame):
         self.yd   = self.yd.roll(-1,0)
         self.x_dm = self.x_dm.roll(-1,0)
         self.yd[-1,:]   = t.tensor(frame.flatten()).to(t.float32)
         self.x_dm[-1,:] = self.x_corr
-        #with t.no_grad():
-        #    self.x *= 0.0
+
         if self.iter >= self.nbuffer:
             mu = 0.001
             nu = 2.0
@@ -156,6 +157,35 @@ class Controller:
             xk_opt = self.x.clone().detach().numpy()
             self.x_corr    = self.leak*(1-self.gain)*self.x_corr - self.gain*(xk_opt)
         self.iter += 1
+
+    # TODO Delet ths
+    def calibrate(self,frame):
+        if self.calibration_status == 0:
+            self.calibration_status = 1 # getting reference slope
+            self.set_command(np.r_[0.0,0.0])
+            self.t_settled = time.time() + 2.0
+        elif self.calibration_status == 1:
+            if time.time() > self.t_settled:
+                self.calibration_status = 2 # reference slope frame available
+                self.cog_ref = self.cog(frame)
+                self.set_command(np.r_[1,0.0]) # get tip response
+                self.t_settled = time.time() + 2.0
+        elif self.calibration_status == 2:
+            if time.time() > self.t_settled:
+                self.calibration_status = 3 # reference slope frame available
+                self.cog_ref_tip = self.cog(frame)-self.cog_ref
+                self.set_command(np.r_[0.0,1.0]) # get tilt response
+                self.t_settled = time.time() + 2.0
+        elif self.calibration_status == 3:
+            if time.time() > self.t_settled:
+                self.calibration_status = 0 # reference slope frame available
+                self.cog_ref_tilt = self.cog(frame)-self.cog_ref
+                self.set_command(np.r_[0.0,0.0])
+                self.init = False
+                print(self.cog_ref_tip)
+                print(self.cog_ref_tilt)
+                self.cog_gain = np.linalg.inv(np.array([self.cog_ref_tip,self.cog_ref_tilt]))
+        self.apply_command()
 
 class SLM(slmpy.SLMdisplay):
     """Class to extend the functionality of SLMdisplay to
@@ -269,62 +299,28 @@ class SLM(slmpy.SLMdisplay):
 if __name__ == "__main__":
     doc = docopt(__doc__)
 
-    # parameters (eventually should be moved to cli/docopt)
-    # global params
-    wavelength = 0.633
-
-    # controller params
-    ctrl_im_width_full = 40
-    ctrl_im_rebin = 2
-
-    ctrl_im_width = ctrl_im_width_full // ctrl_im_rebin
-    ctrl_pup_width = 100
-    ctrl_pup_kwargs = {
-        "x0" : ctrl_pup_width/2,
-        "y0" : ctrl_pup_width/2,
-        "x_res" : ctrl_pup_width,
-        "y_res" : ctrl_pup_width,
-        "seg_diam" : ctrl_pup_width/(3+0.359/8.4*2)
-    }
-    ctrl_pup_s = t.tensor(make_pupil(**ctrl_pup_kwargs)).to(t.float32)
-    ctrl_phimat = t.tensor(np.concatenate([
-        #make_tt_phimat(**ctrl_pup_kwargs),
-        #make_foc_phimat(**ctrl_pup_kwargs),
-        make_phimat(**ctrl_pup_kwargs)],axis=0
-        )).to(t.float32)
-    ctrl_fft_width = 384
-
     # slm params
     slm_monitor_id = int(doc["--monitor"])
-    slm_full_width = 556 # full width of GMT pupil across long axis
-    slm_x0 = 438
-    slm_y0 = 302
+    slm_full_width = 615 # full width of GMT pupil across long axis
+    slm_x0 = 455
+    slm_y0 = 285
     slm_seg_diam = slm_full_width/(3+0.359/8.4*2) # segment diameter in pixels
     
 
     # camera params
-    cam_im_width_full = 80
+    cam_im_width_full = 56
     cam_im_rebin = 4
     assert(cam_im_width_full % cam_im_rebin == 0)
     cam_im_width = cam_im_width_full // cam_im_rebin
     cam_offset_x = 464
-    cam_offset_y = 550
+    cam_offset_y = 520
     cam_pixel_as = 1.0 # TODO compute this from physical system parameters
     cam_dark_frame = np.load("dark.npy")
-
-    # initialise controller
-    ctrl = Controller(im_width=ctrl_im_width, pup_width=ctrl_pup_width,
-                fft_width=ctrl_fft_width, rebin_factor=ctrl_im_rebin,
-                nstate=ctrl_phimat.shape[0], pup_s=ctrl_pup_s,
-                get_phase = lambda x : t.einsum("ijk,i->jk",ctrl_phimat,x))
 
     # initialise slm
     slm = SLM(monitor=slm_monitor_id,isImageLock=True,wrap=True)
     slm_phimat = np.concatenate([
         make_tt_phimat(x0=slm_x0, y0=slm_y0, 
-                x_res=slm._res_x, y_res=slm._res_y,
-                seg_diam=slm_seg_diam),
-        make_foc_phimat(x0=slm_x0, y0=slm_y0, 
                 x_res=slm._res_x, y_res=slm._res_y,
                 seg_diam=slm_seg_diam),
         make_phimat(x0=slm_x0, y0=slm_y0, 
@@ -335,127 +331,17 @@ if __name__ == "__main__":
     slm.update()
 
     # initialise camera
-    cam  = CameraHandler(width=cam_im_width_full, height=cam_im_width_full,
-                offset_x=cam_offset_x, offset_y=cam_offset_y,
-                exposure=100e3, gain=5.0)
-
-    u_ref = np.zeros(10)
-    u_ref[:3] = np.array([0.5,8.5,-0.5])
-
-    u = np.zeros(slm_phimat.shape[0])
-    # run tt loop to find offset
-    yy,xx = np.mgrid[:cam_im_width,:cam_im_width]-cam_im_width/2+0.5
     if 1==1:
+        cam  = CameraHandler(width=cam_im_width_full, height=cam_im_width_full,
+                    offset_x=cam_offset_x, offset_y=cam_offset_y,
+                    exposure=100e3, gain=5.0)
+
         with cam.FrameGrabber(cam) as fg:
-            fig,ax = plt.subplots(figsize=[3,3])
-            ax.imshow(rebin(fg.grab(1)[0].astype(np.float32),cam_im_rebin))
-            ax.images[0].set_clim(0,2**16)
-            for _ in range(100):
-                # grab a frame
-                frame = rebin(fg.grab(1)[0]*1.0,cam_im_rebin)-cam_dark_frame
-                frame = frame.astype(np.float32)
-                frame[frame<0] = 0
-                ax.images[0].set_data(frame)
-                # update command
-                cogx = frame.flatten() @ xx.flatten() / frame.sum()
-                cogy = frame.flatten() @ yy.flatten() / frame.sum()
-                s = np.r_[cogx,cogy]
-                u[:2] = u[:2] - 0.2 * s
-                
-                # apply command
-                slm.clear_phase()
-                slm.add_piston_phase(0.5)
-                slm.add_phimat_phase(u)
-                slm.update()
-
-                # wait a bit
-                cv2.waitKey(20)
-        u_ref[:2] = u[:2].copy()
-
-    # calibrate
-    # compare analytical and acquired image with no phase applied
-    x_test_ctrl = np.zeros(ctrl_phimat.shape[0])
-    x_test_slm = np.zeros(slm_phimat.shape[0])
-    y_test_ctrl = ctrl.h_func(t.tensor(x_test_ctrl).to(t.float32)).detach().numpy()
-    slm.clear_phase()
-    slm.add_piston_phase(0.5)
-    slm.add_phimat_phase(u_ref)
-    slm.add_phimat_phase(x_test_slm)
-    slm.update()
-    cv2.waitKey(100)
-    with cam.FrameGrabber(cam) as fg:
-        y_test_cam = rebin(np.mean(fg.grab(10),axis=0),cam_im_rebin)-cam_dark_frame
-    flux_ratio = y_test_ctrl.sum()/y_test_cam.sum()
-
-    fig,ax = plt.subplots(figsize=[4,4])
-    ax.imshow(y_test_cam*flux_ratio)
-    cv2.waitKey(100)
-    
-    im_mask = (y_test_ctrl>0.0001)
-    ctrl.im_mask = t.tensor(im_mask)
-    ctrl.nmeas = (im_mask==1).sum()
-    ctrl.init_mhe(20,100,1)
-    
-    #stophere
-    #dark = 600
-    sigma_tt = 0.0 # units are tbd
-    sigma_foc = 0.0
-    sigma_piston = 0.05
-    #F_matrix = block_diag(np.eye(7)-1/7*np.ones([7,7]))
-    F_matrix = block_diag(np.eye(3),np.eye(7)-1/7*np.ones([7,7]))
-    sigma_x = np.concatenate([
-            np.ones(2)*sigma_tt,
-            np.ones(1)*sigma_foc,
-            np.ones(7)*sigma_piston
-            ],axis=0)
-    Sigma_x = F_matrix @ np.diag(sigma_x) @ F_matrix.T
-    a_matrix = 0.99*np.ones(sigma_x.shape[0])
-    A_matrix = np.diag(a_matrix) @ F_matrix
-    Sigma_v = Sigma_x - A_matrix @ Sigma_x @ A_matrix.T
-    w,v = np.linalg.eigh(Sigma_v)
-    v = v[:,w>1e-9]
-    w = w[w>1e-9]
-    B_matrix = v @ np.diag(w**0.5)
-    w,v = np.linalg.eigh(Sigma_x)
-    v = v[:,w>1e-9]
-    w = w[w>1e-9]
-    S_matrix = v @ np.diag(w**0.5)
-
-    disturbance = S_matrix @  np.random.randn(S_matrix.shape[1])
-
-    # run control loop
-    scale = 1.5
-    frames = []
-    x_log = []
-    u_log = []
-    with cam.FrameGrabber(cam) as fg:
-        for it in tqdm(range(500)):
-            # update disturbance
-            disturbance = a_matrix * disturbance + B_matrix @ np.random.randn(B_matrix.shape[1])
-            # grab a frame
-            frame = (rebin(fg.grab(1)[0]*1.0,cam_im_rebin)-cam_dark_frame)*flux_ratio
-            ax.images[0].set_data(frame)
-            frames.append(frame)
-            slm.clear_phase()
-
-            x_log.append(disturbance.copy()[3:])
-            u_log.append(ctrl.x_corr*1.0)
-            print(t.norm(t.tensor(x_log[-1])+u_log[-1],"fro"))
-            
-            if it > 20:
-                # update command
-                ctrl.update(frame[im_mask])
-                x_corr = disturbance*0
-                x_corr[3:] = t.einsum("ij,i->j",t.tensor(F_matrix)[3:,3:].to(t.float32),ctrl.x_corr)
-                slm.add_phimat_phase(x_corr*scale)
-
-            # apply command
-            slm.add_piston_phase(0.5)
-            slm.add_phimat_phase(u_ref)
-            slm.add_phimat_phase(disturbance*scale)
-            slm.update()
-            cv2.waitKey(100)
-
-    np.save("frames.npy",frames)
-    np.save("x.npy",np.array(x_log))
-    np.save("u.npy",np.array(u_log))
+            fig,ax = plt.subplots(figsize=[4,4])
+            ax.imshow(fg.grab(1)[0])
+            while True:
+                ax.images[0].set_data(fg.grab(1)[0])
+                cv2.waitKey(10)
+    else:
+        while True:
+            cv2.waitKey(10)

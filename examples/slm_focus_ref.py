@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 from slm_make_gmt_pupil import make_phimat,make_pupil,make_tt_phimat,make_foc_phimat
 from tqdm import tqdm
 from scipy.signal import fftconvolve
-from scipy.linalg import block_diag
 
 plt.ion()
 
@@ -288,10 +287,9 @@ if __name__ == "__main__":
     }
     ctrl_pup_s = t.tensor(make_pupil(**ctrl_pup_kwargs)).to(t.float32)
     ctrl_phimat = t.tensor(np.concatenate([
-        #make_tt_phimat(**ctrl_pup_kwargs),
-        #make_foc_phimat(**ctrl_pup_kwargs),
-        make_phimat(**ctrl_pup_kwargs)],axis=0
-        )).to(t.float32)
+        make_tt_phimat(**ctrl_pup_kwargs),
+        make_foc_phimat(**ctrl_pup_kwargs),
+        ],axis=0)).to(t.float32)
     ctrl_fft_width = 384
 
     # slm params
@@ -327,10 +325,8 @@ if __name__ == "__main__":
         make_foc_phimat(x0=slm_x0, y0=slm_y0, 
                 x_res=slm._res_x, y_res=slm._res_y,
                 seg_diam=slm_seg_diam),
-        make_phimat(x0=slm_x0, y0=slm_y0, 
-                x_res=slm._res_x, y_res=slm._res_y,
-                seg_diam=slm_seg_diam)],axis=0)
-    slm.set_phimat(phimat=slm_phimat*0.14)
+        ],axis=0)
+    slm.set_phimat(phimat=slm_phimat*0.14) # this constant is related to wavelength
     slm.clear_phase()
     slm.update()
 
@@ -338,14 +334,10 @@ if __name__ == "__main__":
     cam  = CameraHandler(width=cam_im_width_full, height=cam_im_width_full,
                 offset_x=cam_offset_x, offset_y=cam_offset_y,
                 exposure=100e3, gain=5.0)
-
-    u_ref = np.zeros(10)
-    u_ref[:3] = np.array([0.5,8.5,-0.5])
-
-    u = np.zeros(slm_phimat.shape[0])
+    u = np.zeros(ctrl_phimat.shape[0])
     # run tt loop to find offset
     yy,xx = np.mgrid[:cam_im_width,:cam_im_width]-cam_im_width/2+0.5
-    if 1==1:
+    if 1==0:
         with cam.FrameGrabber(cam) as fg:
             fig,ax = plt.subplots(figsize=[3,3])
             ax.imshow(rebin(fg.grab(1)[0].astype(np.float32),cam_im_rebin))
@@ -370,46 +362,133 @@ if __name__ == "__main__":
 
                 # wait a bit
                 cv2.waitKey(20)
-        u_ref[:2] = u[:2].copy()
+        print(u)
+    else:       
+        u[0] = 0.5
+        u[1] = 8.5
+    
+    u_ref = u.copy()
+    if 1==0:
+        # focus:
+        u = u_ref.copy()
+        intsty = []
+        fs = np.linspace(-2,2,21)
+        slm.clear_phase()
+        slm.add_piston_phase(0.5)
+        slm.add_phimat_phase(u)
+        slm.update()
+        cv2.waitKey(100)
+        s = []
+        with cam.FrameGrabber(cam) as fg:
+            fig,ax = plt.subplots(figsize=[3,3])
+            ax.imshow(rebin(fg.grab(1)[0].astype(np.float32),cam_im_rebin))
+            ax.images[0].set_clim(0,2**16)
+            for f in fs:
+                # update command
+                u[2] = f
+                
+                # apply command
+                slm.clear_phase()
+                slm.add_piston_phase(0.5)
+                slm.add_phimat_phase(u)
+                slm.update()
+
+                # wait a bit
+                cv2.waitKey(20)
+                
+                # grab a frame
+                frame = rebin(np.max(fg.grab(50),axis=0),cam_im_rebin)-cam_dark_frame
+                frame = frame.astype(np.float32)
+                cogx = frame.flatten() @ xx.flatten() / frame.sum()
+                cogy = frame.flatten() @ yy.flatten() / frame.sum()
+                s.append(np.r_[cogx,cogy])
+                intsty.append(frame.max())
+                ax.images[0].set_data(frame)
+        cv2.waitKey(100)
+        s = np.array(s)
+        """
+        plt.figure()
+        plt.plot(fs,s[:,0],label="tip")
+        plt.plot(fs,s[:,1],label="tilt")
+        plt.xlabel("defocus")
+        plt.ylabel("slope")
+        plt.axis("square")
+        plt.xlim([-5,5])
+        plt.ylim([-5,5])
+        cv2.waitKey(100)
+        """
+        intsty = np.array(intsty)
+        f_ref = fs[np.argmax(intsty)]
+        u_ref[2] = f_ref
+        plt.figure()
+        plt.plot(fs,intsty)
+    else:
+        u_ref[2] = -0.5
+    print(u_ref)
+
+
 
     # calibrate
     # compare analytical and acquired image with no phase applied
-    x_test_ctrl = np.zeros(ctrl_phimat.shape[0])
-    x_test_slm = np.zeros(slm_phimat.shape[0])
-    y_test_ctrl = ctrl.h_func(t.tensor(x_test_ctrl).to(t.float32)).detach().numpy()
+    x_test = np.zeros(ctrl_phimat.shape[0])
+    y_test_ctrl = ctrl.h_func(t.tensor(x_test).to(t.float32)).detach().numpy()
     slm.clear_phase()
     slm.add_piston_phase(0.5)
     slm.add_phimat_phase(u_ref)
-    slm.add_phimat_phase(x_test_slm)
+    slm.add_phimat_phase(x_test)
     slm.update()
     cv2.waitKey(100)
     with cam.FrameGrabber(cam) as fg:
         y_test_cam = rebin(np.mean(fg.grab(10),axis=0),cam_im_rebin)-cam_dark_frame
-    flux_ratio = y_test_ctrl.sum()/y_test_cam.sum()
-
-    fig,ax = plt.subplots(figsize=[4,4])
-    ax.imshow(y_test_cam*flux_ratio)
+    flux_ratio = y_test_ctrl.std()/y_test_cam.std()
+    plt.matshow(y_test_ctrl)
+    plt.colorbar()
+    plt.matshow(y_test_cam*flux_ratio)
+    plt.colorbar()
+    plt.matshow(y_test_ctrl-y_test_cam*flux_ratio)
+    plt.colorbar()
+    plt.title("difference no aberrations")
     cv2.waitKey(100)
-    
+
     im_mask = (y_test_ctrl>0.0001)
     ctrl.im_mask = t.tensor(im_mask)
     ctrl.nmeas = (im_mask==1).sum()
-    ctrl.init_mhe(20,100,1)
+    ctrl.init_mhe(10,100,1)
+    #errhere
+    
+    # compare analytical and acquired image with some phase applied
+    #x_test = np.random.randn(ctrl_phimat.shape[0])
+    x_test = np.r_[5.0,0.0,-0.5]
+    y_test_ctrl = ctrl.h_func(t.tensor(x_test).to(t.float32)).detach().numpy()
+    scale = 1.5
+    slm.clear_phase()
+    slm.add_piston_phase(0.5)
+    slm.add_phimat_phase(u_ref)
+    slm.add_phimat_phase(x_test*scale)
+    slm.update()
+    cv2.waitKey(100)
+    with cam.FrameGrabber(cam) as fg:
+        y_test_cam = (rebin(fg.grab(1)[0],cam_im_rebin)-cam_dark_frame)*flux_ratio
+    plt.matshow(y_test_ctrl)
+    plt.colorbar()
+    plt.matshow(y_test_cam)
+    plt.colorbar()
+    plt.matshow(y_test_ctrl-y_test_cam)
+    plt.colorbar()
+    plt.title("difference with aberration")
+    cv2.waitKey(1)
     
     #stophere
     #dark = 600
-    sigma_tt = 0.0 # units are tbd
-    sigma_foc = 0.0
-    sigma_piston = 0.05
-    #F_matrix = block_diag(np.eye(7)-1/7*np.ones([7,7]))
-    F_matrix = block_diag(np.eye(3),np.eye(7)-1/7*np.ones([7,7]))
+    sigma_tt = 1.0 # units are tbd
+    sigma_foc = 2.0
+    F_matrix = np.eye(3)
     sigma_x = np.concatenate([
             np.ones(2)*sigma_tt,
-            np.ones(1)*sigma_foc,
-            np.ones(7)*sigma_piston
-            ],axis=0)
+            np.ones(1)*sigma_foc
+            ])
     Sigma_x = F_matrix @ np.diag(sigma_x) @ F_matrix.T
-    a_matrix = 0.99*np.ones(sigma_x.shape[0])
+    a_matrix = 1.00*np.ones(3)
     A_matrix = np.diag(a_matrix) @ F_matrix
     Sigma_v = Sigma_x - A_matrix @ Sigma_x @ A_matrix.T
     w,v = np.linalg.eigh(Sigma_v)
@@ -422,9 +501,29 @@ if __name__ == "__main__":
     S_matrix = v @ np.diag(w**0.5)
 
     disturbance = S_matrix @  np.random.randn(S_matrix.shape[1])
+    # compare synth and real disturbance
+    slm.clear_phase()
+    slm.add_piston_phase(0.5)
+    slm.add_phimat_phase(u_ref)
+    slm.add_phimat_phase(disturbance)
+    slm.update()
+    cv2.waitKey(1000)
+    with cam.FrameGrabber(cam) as fg:
+        frame = (rebin(np.mean(fg.grab(100),axis=0)*1.0,cam_im_rebin)-cam_dark_frame)*flux_ratio
+        plt.matshow(frame)
+        plt.title("true image after disturbance")
+        plt.colorbar()
+        ctrl_frame = ctrl.h_func(t.tensor(disturbance).to(t.float32))
+        plt.matshow(ctrl_frame)
+        plt.title("synth image after disturbance")
+        plt.colorbar()
+    
 
+    #disturbance = np.r_[10,-3,1,-1,1,-1,1,-1,1]*0.3
+    #disturbance[2:] -= disturbance[2:].mean()
+    fig,ax = plt.subplots(figsize=[4,4])
+    ax.imshow(y_test_cam)
     # run control loop
-    scale = 1.5
     frames = []
     x_log = []
     u_log = []
@@ -438,24 +537,28 @@ if __name__ == "__main__":
             frames.append(frame)
             slm.clear_phase()
 
-            x_log.append(disturbance.copy()[3:])
+            x_log.append(disturbance.copy())
             u_log.append(ctrl.x_corr*1.0)
             print(t.norm(t.tensor(x_log[-1])+u_log[-1],"fro"))
             
             if it > 20:
                 # update command
                 ctrl.update(frame[im_mask])
-                x_corr = disturbance*0
-                x_corr[3:] = t.einsum("ij,i->j",t.tensor(F_matrix)[3:,3:].to(t.float32),ctrl.x_corr)
-                slm.add_phimat_phase(x_corr*scale)
+                ctrl.x_corr = t.einsum("ij,i->j",t.tensor(F_matrix).to(t.float32),ctrl.x_corr)
+                #ctrl.x_corr[2] *= -1
+                slm.add_phimat_phase(ctrl.x_corr*scale)
 
             # apply command
             slm.add_piston_phase(0.5)
             slm.add_phimat_phase(u_ref)
             slm.add_phimat_phase(disturbance*scale)
             slm.update()
+            #print(ctrl.x_corr - disturbance)
+            #print(((ctrl.x_corr - disturbance)**2).sum()**0.5)
+            #print(frame.max())
+            # wait a bit
             cv2.waitKey(100)
 
-    np.save("frames.npy",frames)
-    np.save("x.npy",np.array(x_log))
-    np.save("u.npy",np.array(u_log))
+np.save("frames.npy",frames)
+np.save("x.npy",np.array(x_log))
+np.save("u.npy",np.array(u_log))

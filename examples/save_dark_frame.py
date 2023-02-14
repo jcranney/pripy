@@ -4,7 +4,7 @@ Usage: test_slm.py [options]
 
     -s, --slm               Use the SLM
     -m, --monitor <id>      The monitor to use, -1 means virtual SLM [default: -1]
-    -r, --radius <pixels>   Radius of pupil to use in pixels [default: 205]
+    -r, --radius <pixels>   Radius of pupil to use in pixels [default: 300]
     -x, --xoffset <pixels>  x offset in pixels [default: 0]
     -y, --yoffset <pixels>  y offset in pixels [default: 0]
 """
@@ -15,49 +15,140 @@ import numpy as np
 import slmpy
 from math import factorial
 import torch as t
-from pointgrey_handler import CameraHandler
+t.set_num_threads(6)
+from pointgrey_handler import CameraHandler as CameraHandler
 import time
 import matplotlib.pyplot as plt
+from slm_make_gmt_pupil import make_phimat,make_pupil,make_tt_phimat
+from tqdm import tqdm
+from scipy.signal import fftconvolve
+
 plt.ion()
 
-class Controller:
-    u = np.r_[0.0,0.0]
+def rebin(a, factor):
+    sh = a.shape[0]//factor,factor,a.shape[1]//factor,factor
+    return a.reshape(sh).mean(-1).mean(1)
 
+class Controller:
+    
     init = True            # True when requiring initialisation
     calibration_status = 0 # zero when finished or not yet started
 
-    def __init__(self,im_width):
+    def __init__(self, im_width: int, pup_width: int, fft_width: int,
+                rebin_factor: int, nstate: int, pup_s: np.ndarray, 
+                get_phase: callable):
+        self.pup_width = pup_width
         self.im_width = im_width
-        self._im_xx,self._im_yy = t.meshgrid(t.arange(im_width),t.arange(im_width))
-        self._im_xx = self._im_xx.to(t.float32)
-        self._im_yy = self._im_yy.to(t.float32)
-
-    def step(self,frame): 
-        # convert image8bit to mini display format
-        cam_image = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-        # display image on window
-        cv2.imshow('Cam img',cam_image)
-
-        frame = frame.copy()
-        frame[frame<=40] = 40
-        frame -= 40
-        frame = t.tensor(frame,dtype=t.float32)
-
-        if self.init:
-            self.calibrate(frame) 
-            return
-        
-        cog = self.cog(frame)
-        self.u = 0.999 * self.u - 0.1 * self.cog_gain @ cog
-        print(self.u)
-        self.set_command(self.u - self.cog_gain @ self.cog_ref)
-        self.apply_command()
+        self.fft_width = fft_width
+        self.rebin_factor = rebin_factor
+        self.pup_s = t.tensor(pup_s,dtype=t.float32)
+        yy_s,xx_s = t.meshgrid(t.arange(pup_width)/(pup_width-1)-0.5,
+                               t.arange(pup_width)/(pup_width-1)-0.5)
     
-    def cog(self,frame):
-        cog_x = frame.flatten() @ self._im_xx.flatten() / frame.flatten().sum()
-        cog_y = frame.flatten() @ self._im_yy.flatten() / frame.flatten().sum()
-        return np.r_[cog_x,cog_y]-self.im_width/2+0.5
+        # offset to get the image centred on 2x2 pixels
+        self.phase_offset = -(xx_s+yy_s)*(pup_width-1)*2*t.pi/fft_width/2
+        self.get_phase = get_phase
+        self.nstate = nstate
+        self.nmeas  = im_width**2
 
+    def phase_to_image(self,phi):
+        """Take wavefront phase in small pupil dimensions and return image
+        
+        Args:
+            phi (ndarray): phase in small pupil dimensions
+
+        Returns:
+            ndarray: focal plane image
+        """
+        wf_s = self.pup_s * t.exp(1j*(phi+self.phase_offset))
+        im_F = t.abs(t.fft.fftshift(t.fft.fft2(wf_s,s=[self.fft_width,self.fft_width]))/self.pup_s.sum())**2
+        return im_F
+
+    @staticmethod
+    def rebin(a, factor):
+        sh = a.shape[0]//factor,factor,a.shape[1]//factor,factor
+        return a.reshape(sh).mean(-1).mean(1)
+
+    def trim_im(self,im):
+        """Trim image to a square of size trimmed_width x trimmed_width
+
+        Args:
+            im (ndarray): image to trim
+            trimmed_width (int): size of the trimmed image
+
+        Returns:
+            ndarray: trimmed image
+        """
+        im = rebin(im,self.rebin_factor)
+        return im[
+            im.shape[0]//2-self.im_width//2:im.shape[0]//2+self.im_width//2,
+            im.shape[1]//2-self.im_width//2:im.shape[1]//2+self.im_width//2
+            ]
+
+    def h_func(self,x):
+        "takes state, returns image"
+        return self.trim_im(self.phase_to_image(self.get_phase(x)))
+
+    def init_mhe(self,nbuffer,sigma_x,sigma_w):
+        self.nbuffer = nbuffer
+        self.Sigma_x_inv_fact = 1/(sigma_x)**0.5*t.eye(self.nstate)
+        self.Sigma_w_inv_fact = 1/(sigma_w)**0.5*t.eye(self.nmeas)
+        
+        self.x = t.zeros([self.nstate],requires_grad=True)
+        self.optimizer = t.optim.SGD([self.x],lr=0.01)
+
+        self.gain = 0.5
+        self.leak = 1.0
+
+        self.x_dm = t.zeros([self.nbuffer,self.nstate])
+        self.yd = t.zeros([self.nbuffer,self.nmeas])
+        self.x_corr = t.zeros(self.nstate)
+
+        self.iter = 0
+
+    def cost_ls(self,x,u,y):
+        z = t.zeros(self.nbuffer*self.nmeas)
+        for n in range(self.nbuffer):
+            tmp = y[n]-self.h_func(x+u[n]).flatten()
+            z[n*self.nmeas:(n+1)*self.nmeas] = t.einsum("i,ij->j",tmp,self.Sigma_w_inv_fact)
+        return z
+
+    def update(self,frame):
+        self.yd   = self.yd.roll(-1,0)
+        self.x_dm = self.x_dm.roll(-1,0)
+        self.yd[-1,:]   = t.tensor(frame.flatten()).to(t.float32)
+        self.x_dm[-1,:] = self.x_corr
+
+        if self.iter >= self.nbuffer:
+            mu = 0.001
+            nu = 2.0
+            ep_1 = ep_2 = 1e-6
+            jac = t.autograd.functional.jacobian(lambda x : self.cost_ls(x,self.x_dm,self.yd),self.x,vectorize=True,strategy="forward-mode")
+            f_x = self.cost_ls(self.x,self.x_dm,self.yd)
+            old_cost = (f_x**2).sum()
+            for _ in tqdm(range(20),leave=False):
+                dx  = -t.linalg.solve(jac.T @ jac + mu * t.eye(self.nstate), jac.T @ f_x)
+                if t.norm(dx,"fro") <= ep_2*(t.norm(self.x,"fro")+ep_2):
+                    break
+                x_new = self.x + dx
+                cost = (self.cost_ls(x_new,self.x_dm,self.yd)**2).sum()
+                rho = (old_cost - cost)/(0.5*dx @ (mu*dx - jac.T @ f_x))
+                if rho > 0:
+                    with t.no_grad():
+                        self.x += dx
+                    jac = t.autograd.functional.jacobian(lambda x : self.cost_ls(x,self.x_dm,self.yd),self.x,vectorize=True,strategy="forward-mode")
+                    f_x = self.cost_ls(self.x,self.x_dm,self.yd)
+                    old_cost = (f_x**2).sum()
+                    mu = mu * max(1/3,1-(2*rho-1)**3)
+                    nu   = 2
+                else:
+                    mu = mu * nu
+                    nu = 2 * nu
+            xk_opt = self.x.clone().detach().numpy()
+            self.x_corr    = self.leak*(1-self.gain)*self.x_corr - self.gain*(xk_opt)
+        self.iter += 1
+
+    # TODO Delet ths
     def calibrate(self,frame):
         if self.calibration_status == 0:
             self.calibration_status = 1 # getting reference slope
@@ -92,7 +183,7 @@ class SLM(slmpy.SLMdisplay):
     """
 
     def __init__(self,*args,monitor=1,wrap=False,x0=0,y0=0,
-        mini_res_x=320,mini_res_y=200,mask=None,phimat=None,**kwargs):
+        mini_res_x=800,mini_res_y=600,mask=None,phimat=None,**kwargs):
         """initialise SLM object
         
         Args:
@@ -113,8 +204,6 @@ class SLM(slmpy.SLMdisplay):
             self._virtual = True
             self._res_x, self._res_y = (mini_res_x, mini_res_y)
         self._wrap  = wrap
-        x0 = self._res_x//2-x0
-        y0 = self._res_y//2-y0
         yy,xx = np.mgrid[:self._res_y,:self._res_x]*1.0
         xx -= x0
         yy -= y0
@@ -199,84 +288,64 @@ class SLM(slmpy.SLMdisplay):
 
 if __name__ == "__main__":
     doc = docopt(__doc__)
-    
+
+    # parameters (eventually should be moved to cli/docopt)
+    # global params
+    wavelength = 0.633
+
+    # slm params
+    slm_monitor_id = int(doc["--monitor"])
+    slm_full_width = 615 # full width of GMT pupil across long axis
+    slm_x0 = 455
+    slm_y0 = 285
+    slm_seg_diam = slm_full_width/(3+0.359/8.4*2) # segment diameter in pixels
+
     # camera params
-    cam_im_width_full = 56
+    cam_im_width_full = 80
     cam_im_rebin = 4
     assert(cam_im_width_full % cam_im_rebin == 0)
     cam_im_width = cam_im_width_full // cam_im_rebin
     cam_offset_x = 464
-    cam_offset_y = 520
+    cam_offset_y = 550
     cam_pixel_as = 1.0 # TODO compute this from physical system parameters
-    cam_dark_frame = np.load("dark.npy")
 
+    # initialise camera
     cam  = CameraHandler(width=cam_im_width_full, height=cam_im_width_full,
                 offset_x=cam_offset_x, offset_y=cam_offset_y,
                 exposure=100e3, gain=5.0)
-
-    monitor_id = int(doc["--monitor"])
-
-    slm_monitor_id = int(doc["--monitor"])
-
+    
     # initialise slm
     slm = SLM(monitor=slm_monitor_id,isImageLock=True,wrap=True)
+    slm_phimat = np.concatenate([
+        make_tt_phimat(x0=slm_x0, y0=slm_y0, 
+                x_res=slm._res_x, y_res=slm._res_y,
+                seg_diam=slm_seg_diam),
+        make_phimat(x0=slm_x0, y0=slm_y0, 
+                x_res=slm._res_x, y_res=slm._res_y,
+                seg_diam=slm_seg_diam)],axis=0)
+    slm.set_phimat(phimat=slm_phimat*0.14)
     slm.clear_phase()
+    slm.add_poly(0,1,100)
+    slm.add_poly(1,0,100)
     slm.update()
-    
-    #  plan:
-    # sweep a vertical bar from left to right, and observe the peak intensity of the image
-    # as a function of sweep position, then do the same for a horizontal bar from top to
-    # bottom. This will give us the boundaries of the pupil, which determine the width and
-    # centre position of the segmented pupil.
 
-    def vertical_bar(slm,pos,width=5):
-        slm.clear_phase()
-        yy,xx = np.mgrid[:slm._res_y,:slm._res_x]
-        zz = (xx < (pos))*0.5
-        slm._image += zz
-        slm.update()
-    
-    def horizontal_bar(slm,pos,width=5):
-        slm.clear_phase()
-        yy,xx = np.mgrid[:slm._res_y,:slm._res_x]
-        zz = (yy < (pos))*0.5
-        slm._image += zz
-        slm.update()
-    
+    with cam.FrameGrabber(cam) as fg:
+        dark = rebin(np.mean(fg.grab(10),axis=0),cam_im_rebin)
     fig,ax = plt.subplots()
-    xpos = []
-    intensity = []
+    ax.imshow(dark)
     with cam.FrameGrabber(cam) as fg:
-        ax.imshow(np.mean(fg.grab(10),axis=0))
-        for x in range(slm._res_x)[::1]:
-            vertical_bar(slm,x)
-            cv2.waitKey(100)
-            frame = np.max(fg.grab(40),axis=0)  
-            print(frame.max())
-            # display image on window
-            ax.images[0].set_data(frame)
-            xpos.append(x)
-            intensity.append(frame.max())
+        dark = rebin(fg.grab(1)[0],cam_im_rebin)
+    ax.images[0].set_data(dark)
+    ax.images[0].set_clim([dark.min(),dark.max()])
+    ax.set_title(f"{dark.min():0.2f} - {dark.max():0.2f}")
+    key = cv2.waitKey(100)
+
+    print("saving frame")
     
-    print("finished col sweep")
-    np.save("column_sweep.npy",np.c_[xpos,intensity])
-    print("saved col sweep")
-    #plt.figure()
-    #plt.plot(xpos,intensity)
-    
-    ypos = []
-    intensity = []
     with cam.FrameGrabber(cam) as fg:
-        for y in range(slm._res_y)[::1]:
-            horizontal_bar(slm,y)
-            cv2.waitKey(100)
-            frame = np.mean(fg.grab(40),axis=0)  
-            print(frame.max())
-            # display image on window
-            ax.images[0].set_data(frame)
-            ypos.append(y)
-            intensity.append(frame.max())
-    
-    print("finished row sweep")
-    np.save("row_sweep.npy",np.c_[ypos,intensity])
-    print("saved row sweep")
+        dark = rebin(np.mean(fg.grab(1000),axis=0),cam_im_rebin)
+
+    plt.matshow(dark)
+    plt.colorbar()
+    print(type(dark))
+    np.save("dark.npy",dark)
