@@ -25,3 +25,9 @@ git clone git@github.com/jcranney/pripy.git
 cd pripy
 pip install .
 ```
+
+## Running `gym` environment
+```bash
+cd examples
+python test_gmtphasing_gym.py
+```
