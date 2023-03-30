@@ -24,7 +24,7 @@ class GMTPhasingEnv(gym.Env):
     """
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 50}
     
-    u_max = 10.0
+    u_max = 100.0
     pup_width = 100
     im_width = 28
     fft_width = 384
@@ -32,7 +32,7 @@ class GMTPhasingEnv(gym.Env):
     nactu  = 9
     gap_width_m = 0.359
     seg_width_m = 8.4
-    sigma = 1.0
+    sigma = 1.5
     alpha = 0.999
     beta = sigma*(1-alpha**2)**0.5
 
