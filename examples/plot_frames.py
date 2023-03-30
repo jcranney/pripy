@@ -5,7 +5,7 @@ import seaborn
 seaborn.set_theme()
 
 
-frames = np.load("frames.npy")[1:251]
+frames = np.load("frames.npy")[:]
 frames[frames<0] = 0
 frames = frames**0.5
 clim = [frames.min(),frames.max()]

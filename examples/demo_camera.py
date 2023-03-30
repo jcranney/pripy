@@ -312,8 +312,8 @@ if __name__ == "__main__":
     cam_im_rebin = 4
     assert(cam_im_width_full % cam_im_rebin == 0)
     cam_im_width = cam_im_width_full // cam_im_rebin
-    cam_offset_x = 464
-    cam_offset_y = 520
+    cam_offset_x = 764
+    cam_offset_y = 720
     cam_pixel_as = 1.0 # TODO compute this from physical system parameters
     cam_dark_frame = np.load("dark.npy")
 

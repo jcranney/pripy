@@ -301,12 +301,12 @@ if __name__ == "__main__":
     slm_seg_diam = slm_full_width/(3+0.359/8.4*2) # segment diameter in pixels
 
     # camera params
-    cam_im_width_full = 80
+    cam_im_width_full = 56
     cam_im_rebin = 4
     assert(cam_im_width_full % cam_im_rebin == 0)
     cam_im_width = cam_im_width_full // cam_im_rebin
-    cam_offset_x = 464
-    cam_offset_y = 550
+    cam_offset_x = 764
+    cam_offset_y = 720
     cam_pixel_as = 1.0 # TODO compute this from physical system parameters
 
     # initialise camera
