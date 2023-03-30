@@ -21,7 +21,7 @@ Medium-term goals:
 
 ## Installation
 ```bash
-git clone git@github.com/jcranney/pripy.git
+git clone git@github.com:jcranney/pripy.git
 cd pripy
 pip install .
 ```
