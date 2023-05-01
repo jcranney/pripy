@@ -94,10 +94,14 @@ x_corr = np.zeros(x_init.shape)
 
 # uncorrected wavefront phase:
 plt.matshow(phase_s_0+get_phase(x_corr))
-
-y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width).flatten()
-ax = plt.matshow(y.reshape((im_width,im_width)))
 plt.colorbar()
+plt.title("Initial Wavefront")
+
+# uncorrected image
+y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width).flatten()
+plt.matshow(y.reshape((im_width,im_width)))
+plt.colorbar()
+plt.title("Initial Image")
 
 err = []
 costs = []
@@ -125,11 +129,7 @@ for i in tqdm(range(niter),leave=False):
     x_corr_old = x_corr.copy()
     x_a_old = x_a.copy()
     x_b_old = x_b.copy()
-    ax.set_data(y.reshape((im_width,im_width)))
-    ax.set_clim([y.min(),y.max()])
     err.append((phase_s_0+get_phase(x_corr))[pup_s==1].std())
-    plt.title(f"Iteration {i:d}\nError: {err[-1]:0.3f}")
-    plt.savefig("tame_%03d.png"%i)
     
 # error over time
 plt.figure()
@@ -141,4 +141,10 @@ plt.legend()
 
 # residual wavefront phase:
 plt.matshow(phase_s_0+get_phase(x_corr))
+plt.title("Final Wavefront")
+plt.colorbar()
+
+# residual image
 plt.matshow(y.reshape([20,20]))
+plt.colorbar()
+plt.title("Final Image")

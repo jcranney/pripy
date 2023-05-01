@@ -1,8 +1,12 @@
 try:
     import cupy as cp
+    def get(x):
+        return x.get()
 except ImportError as ie:
     Warning("No cupy available, using basic numpy")
     import numpy as cp
+    def get(x):
+        return x
 
 import numpy as np
 
@@ -52,7 +56,7 @@ class TaylorHModel:
         for ni in range(1,order+1):
             out += (1/factorial(ni))*cp.einsum(self._einstring_eval[ni],self.dny[ni],*([x]*ni))
         if CPU:
-            return out.get()
+            return get(out)
         else:
             return out
     
@@ -70,7 +74,7 @@ class TaylorHModel:
         for ni in range(1,order+1-1):
             out += (1/factorial(ni))*cp.einsum(self._einstring_jac[ni],self.dny[ni+1],*([x]*ni))
         if CPU:
-            return out.get()
+            return get(out)
         else:
             return out
         
@@ -88,7 +92,7 @@ class TaylorHModel:
         for ni in range(1,order+1-2):
             out += (1/factorial(ni))*cp.einsum(self._einstring_hess[ni],self.dny[ni+2],*([x]*ni))
         if CPU:
-            return out.get()
+            return get(out)
         else:
             return out
 
@@ -104,7 +108,7 @@ class TaylorHModel:
         out = ((b @ self._mode_to_phase_cp) * (b.conj().sum(axis=1))[:,None]).imag
         out *= -(2*cp.pi/self.wavelength)*2 # not sure why negative here, should be positive surely
         if CPU:
-            return out.get()
+            return get(out)
         else:
             return out
     

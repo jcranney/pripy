@@ -104,16 +104,14 @@ x_corr = np.zeros(nmodes)
 
 # uncorrected wavefront phase:
 plt.matshow(phase_s_0+get_phase(x_corr))
-plt.title("Uncorrected wavefront phase")
 plt.colorbar()
+plt.title("Initial Wavefront")
 
-
-y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width)
-plt.matshow(y)
-plt.title("Initial WFS image")
+# uncorrected image
+y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width).flatten()
+plt.matshow(y.reshape((im_width,im_width)))
 plt.colorbar()
-ax = plt.matshow(y)
-plt.colorbar()
+plt.title("Initial Image")
 
 err = []
 costs = []
@@ -146,5 +144,10 @@ plt.legend()
 
 # residual wavefront phase:
 plt.matshow(phase_s_0+get_phase(x_corr))
-plt.title("Residual wavefront phase")
+plt.title("Final Wavefront")
 plt.colorbar()
+
+# residual image
+plt.matshow(y.reshape([20,20]))
+plt.colorbar()
+plt.title("Final Image")
