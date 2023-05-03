@@ -8,19 +8,15 @@ Usage: test_slm.py [options]
 
 from docopt import docopt
 import numpy as np
-import slmpy
-from math import factorial
 import torch as t
 t.set_num_threads(6)
-from pointgrey_handler import CameraHandler as CameraHandler
 import time
 import matplotlib.pyplot as plt
 from slm_make_gmt_pupil import make_phimat,make_pupil,make_tt_phimat,make_foc_phimat
 from tqdm import tqdm
-from scipy.signal import fftconvolve
 from scipy.linalg import block_diag
 
-import gym
+import gymnasium as gym
 import gym_gmtphasing
 import numpy as np
 
@@ -281,6 +277,6 @@ if __name__ == "__main__":
             x_corr_old[:] = x_corr[:]
             x_corr[:] = t.einsum("ij,i->j",t.tensor(F_matrix).to(t.float32),ctrl.x_corr)
 
-    np.save("frames.npy",frames)
-    np.save("x.npy",np.array(x_log))
-    np.save("u.npy",np.array(u_log))
+    np.save("frames_gym.npy",frames)
+    np.save("x_gym.npy",np.array(x_log))
+    np.save("u_gym.npy",np.array(u_log))

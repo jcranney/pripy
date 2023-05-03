@@ -5,8 +5,29 @@ from typing import Optional, Union
 
 import numpy as np
 
-class GMTPhasingEnv(gym.Env):
-    """Environment for GMT segment phasing.
+class GaussDM:
+    def __init__(self,pup_diam,nact_x,pitch,infl_coeff=0.3,valid_rad=None):
+        actu_y,actu_x = np.mgrid[:nact_x,:nact_x]-nact_x/2+0.5
+        actu_y,actu_x = [a.flatten() for a in [actu_y,actu_x]]
+        yy,xx = np.mgrid[:pup_diam,:pup_diam]-pup_diam/2+0.5
+        if valid_rad is not None:
+            valid = (actu_x**2+actu_y**2)<(valid_rad**2)
+            actu_y,actu_x = [a[valid] for a in [actu_y,actu_x]]
+        actu_y,actu_x = [a*pitch for a in [actu_y,actu_x]]
+        nactu = actu_x.shape[0]
+        influs = np.zeros([nactu,pup_diam,pup_diam],dtype=np.float32)
+        for influ,x,y in zip(influs,actu_x,actu_y):
+            influ[:,:] = infl_coeff**(((x-xx)**2+(y-yy)**2)/pitch**2)
+        self.influs = influs
+        self.xx = actu_x
+        self.yy = actu_y
+    
+    def dm_response(self,command):
+        return np.einsum("ijk,i->jk",self.influs,command)
+
+
+class PhaseDiversityEnv(gym.Env):
+    """Environment for generic phase diversity.
     
     Observations:
         detector readout
@@ -22,67 +43,49 @@ class GMTPhasingEnv(gym.Env):
     
     u_max = 100.0
     pup_width = 100
-    im_width = 28
-    fft_width = 384
-    rebin_factor = 2
-    nactu  = 9
-    gap_width_m = 0.359
-    seg_width_m = 8.4
-    sigma = 1.5
-    alpha = 0.999
-    beta = sigma*(1-alpha**2)**0.5
-
+    nactu_x  = 19
+    pitch = pup_width/(nactu_x-1)
+    im_width = 40
+    fft_width = 200 #384
+    rebin_factor = 1
+    sigma = 1.0
+    buffer_length = 2
+    
     def __init__(self):
         # initialise system
-        self.x0 = self.pup_width/2
-        self.y0 = self.pup_width/2
         self.nmeas  = self.im_width**2
-        self.pup_s = self.make_pupil(self.x0,self.y0)
-        self.phimat = np.concatenate([
-            self.make_tt_phimat(self.x0,self.y0),
-            self.make_phimat(self.x0,self.y0)
-        ])
-        # offset to get the image centred on 2x2 pixels
-        yy_s,xx_s = np.meshgrid(np.arange(self.pup_width)/(self.pup_width-1)-0.5,
-                               np.arange(self.pup_width)/(self.pup_width-1)-0.5)
-        self.phase_offset = -(xx_s+yy_s)*(self.pup_width-1)*2*np.pi/self.fft_width/2
-
+        self.pup_s = self.make_pupil()
+        self.dm = GaussDM(self.pup_width,self.nactu_x,pitch=self.pitch,valid_rad=(self.nactu_x-0.5)/2)
+        self.nactu = self.dm.influs.shape[0]
         self.ideal = self.h_func(np.zeros(self.nactu,dtype=np.float32)).astype(np.float32)
+
         y_max = np.finfo(np.float32).max
-        self.action_space = spaces.Box(low=-self.u_max, high=self.u_max, shape=(self.nactu,), dtype=np.float32)
-        self.observation_space = spaces.Box(-y_max, y_max, shape=(self.im_width, self.im_width), dtype=np.float32)
+        act_space = spaces.Box(low=-self.u_max, high=self.u_max, shape=(self.nactu,), dtype=np.float32)
+        obs_space = spaces.Box(-y_max, y_max, shape=(self.im_width**2,), dtype=np.float32)
+        self.action_space = act_space
+        self.observation_space = spaces.flatten_space(spaces.Tuple(
+            [act_space]*(self.buffer_length-1)+ \
+            [obs_space]*(self.buffer_length)
+        ))
+
+        self.action_buffer = np.zeros([self.buffer_length-1,self.nactu],dtype=np.float32)
+        self.state_buffer = np.zeros([self.buffer_length,self.im_width**2],dtype=np.float32)
 
         self.screen = None
         self.clock = None
         self.isopen = True
         self.state = None
         self.steps_beyond_done = None
+        self._max_episode_steps = 20
     
     def get_phase(self,x):
-        return np.einsum("ijk,i->jk",self.phimat,x)
+        return self.dm.dm_response(x)
 
-    def make_pupil(self,x0,y0):
-        return self.make_phimat(x0,y0).sum(axis=0)
-
-    def make_phimat(self,x0,y0):
-        seg_diam = self.pup_width/(3+self.gap_width_m/self.seg_width_m*2)
-        yy,xx = np.mgrid[:self.pup_width,:self.pup_width]*1.0
-        zz = np.tile(xx[None,:,:]*0,[7,1,1])
-        zz[0,:,:] = (((xx-x0)**2+(yy-y0)**2)**0.5 < seg_diam/2)*1.0
-        for i,theta in enumerate(np.linspace(0,2*np.pi,7)[:-1]):
-            radial_offset = seg_diam*(1+self.gap_width_m/self.seg_width_m)
-            zz[1+i,:,:] = (((xx-x0-radial_offset*np.cos(theta))**2+(yy-y0-radial_offset*np.sin(theta))**2)**0.5 < seg_diam/2)*1.0
-        return zz
-
-    def make_tt_phimat(self,x0,y0):
-        yy,xx = np.mgrid[:self.pup_width,:self.pup_width]*1.0
-        xx -= x0
-        yy -= y0
-        zz = np.tile(xx[None,:,:]*0,[2,1,1])
-        zz[0,:,:] = xx/self.pup_width
-        zz[1,:,:] = yy/self.pup_width
-        return zz
-
+    def make_pupil(self):
+        yy,xx = np.mgrid[:self.pup_width,:self.pup_width]-self.pup_width/2+0.5
+        pup = (xx**2+yy**2)<((self.pup_width/2)**2)
+        return pup
+    
     def phase_to_image(self,phi):
         """Take wavefront phase in small pupil dimensions and return image
         
@@ -92,7 +95,7 @@ class GMTPhasingEnv(gym.Env):
         Returns:
             ndarray: focal plane image
         """
-        wf_s = self.pup_s * np.exp(1j*(phi+self.phase_offset))
+        wf_s = self.pup_s * np.exp(1j*phi)
         im_F = np.abs(np.fft.fftshift(np.fft.fft2(wf_s,s=[self.fft_width,self.fft_width]))/self.pup_s.sum())**2
         return im_F
 
@@ -119,7 +122,7 @@ class GMTPhasingEnv(gym.Env):
 
     def h_func(self,x):
         "takes state, returns image"
-        return self.trim_im(self.phase_to_image(self.get_phase(x)))
+        return self.trim_im(self.phase_to_image(self.get_phase(x))).flatten()
 
     
     def step(self, action):
@@ -127,19 +130,24 @@ class GMTPhasingEnv(gym.Env):
         assert self.action_space.contains(action), err_msg
         assert self.state is not None, "Call reset before using step method."
         
-        self._hidden_state *= self.alpha
-        self._hidden_state += action
-        self._hidden_state += self.beta*np.random.randn(self.nactu)
-        self.state = self.h_func(self._hidden_state).astype(np.float32)
+        state_now = self.h_func(self._hidden_state+action).astype(np.float32)
+        
+        self.action_buffer = np.roll(self.action_buffer,[1],[0])
+        self.action_buffer[0,:] = action
+
+        self.state_buffer = np.roll(self.state_buffer,[1],[0])
+        self.state_buffer[0,:] = state_now
+
+        self.state = np.concatenate([self.state_buffer.flatten(),self.action_buffer.flatten()])
 
         done = not self.observation_space.contains(self.state)
 
         if not done:
-            reward = -((self.state-self.ideal)**2).sum()**0.5*10
+            reward = state_now.max()**0.5
         elif self.steps_beyond_done is None:
             # just finished
             self.steps_beyond_done = 0
-            reward = -((self.state-self.ideal)**2).sum()**0.5*10
+            reward = state_now.max()**0.5
         else:
             if self.steps_beyond_done == 0:
                 logger.warn(
@@ -158,7 +166,11 @@ class GMTPhasingEnv(gym.Env):
         super().reset(seed=seed)
         np.random.seed(seed)
         self._hidden_state = np.random.randn(self.nactu)*self.sigma
-        self.state = self.h_func(self._hidden_state).astype(np.float32)
+        state_now = self.h_func(self._hidden_state).astype(np.float32)
+        self.action_buffer *= 0.0
+        self.state_buffer *= 0.0
+        self.state_buffer[0,:] = state_now
+        self.state = np.concatenate([self.state_buffer.flatten(),self.action_buffer.flatten()])
         self.steps_beyond_done = None
         if not return_info:
             return np.array(self.state, dtype=np.float32)
@@ -170,7 +182,7 @@ class GMTPhasingEnv(gym.Env):
         # create a surface on screen
         win_width = 400
         win_height = 400
-        background = pygame.surfarray.make_surface(np.tile(self.state[:,:,None],[1,1,3])**0.5*255)
+        background = pygame.surfarray.make_surface(np.tile(self.state[:self.im_width**2].reshape([self.im_width,self.im_width])[:,:,None],[1,1,3])**0.5*255)
 
         if self.state is None:
             return None
