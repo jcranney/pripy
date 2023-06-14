@@ -2,11 +2,18 @@
 # coding: utf-8
 
 import numpy as np
-import matplotlib.pyplot as plt; plt.ion()
-
+import matplotlib.pyplot as plt; 
+plt.ion()
 from pripy import FastAndFurious
 from tqdm import tqdm
 from aotools import zernike
+
+# NOTE: the F&F algorithm assumes that a flat wavefront produces an image centered on the detector
+# e.g.,
+# 0 0 0 0
+# 0 1 1 0
+# 0 1 1 0
+# 0 0 0 0
 
 # simulation parameters
 pup_width = 200
@@ -108,13 +115,12 @@ plt.colorbar()
 plt.title("Initial Wavefront")
 
 # uncorrected image
-y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width).flatten()
-plt.matshow(y.reshape((im_width,im_width)))
+y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width)
+plt.matshow(y)
 plt.colorbar()
 plt.title("Initial Image")
 
 err = []
-costs = []
 for i in tqdm(range(niter),leave=False):
     #### FF code, to be made compatible with the TAME code,
     #### Also, would like to do an intermediate modal projection, rather than
@@ -127,12 +133,7 @@ for i in tqdm(range(niter),leave=False):
     phase_corr_old = phase_corr.copy()
     phase_corr = get_phase(x_corr)
     ff.set_diversity_phase((phase_corr-phase_corr_old))
-
-    ax.set_data(y)
-    ax.set_clim([y.min(),y.max()])
     err.append((phase_s_0+phase_corr)[pup_s==1].std())
-    plt.title(f"Iteration {i:d}\nError: {err[-1]:0.3f}")
-    plt.savefig("ff_%03d.png"%i)
     
 # error over time
 plt.figure()
