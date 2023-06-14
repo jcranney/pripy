@@ -22,14 +22,14 @@ class FastAndFurious:
         The width of the image.
     fft_width : int
         The width of the FFT.
-    offset : ndarray (pup_width x pup_width)
-        The offset of the wavefront phase (in radians) required to (e.g.) centre
-        the focal plane image over 2x2 pixels (rather than centred over 1x1).
     epsilon : float/ndarray (fft_width x fft_width)
         The regularisation parameter used in the focal plane of the FF algorithm. 
         Can be a scalar or an array in the fft domain. E.g., this parameter
         should be set to a large number if the corresponding pixel is noisy/unused.
         See example for details.
+    image_center : str
+        The centering mode for the image. Can be either "image_center" (default) or "fft_center", 
+        depending on whether the image is centered on one or two pixels
 
     Attributes
     ----------
@@ -57,19 +57,30 @@ class FastAndFurious:
 
     """
     def __init__(self, pup: np.ndarray, im_width: int, fft_width: int, 
-                offset: np.ndarray, epsilon: float = 1e-5):
+                epsilon: float = 1e-5, image_center: str = 'image_center'):
         """ Initialise an instance of FastAndFurious.
         """
+        pup_width       = pup.shape[0]       # width of pupil
         self.im_width   = im_width           # width of image
-        self.pup_width  = pup.shape[0] # width of the pupil
+        self.pup_width  = pup_width          # width of the pupil
         self.fft_width  = fft_width          # width of fft
 
-        # Set up the (hidden) parameters. These are all either scalars or cupy
-        # arrays.
+        if image_center == 'image_center':
+            print('Assuming that the image is centered on 2x2 pixels at the center of the array')
+            self.image_center = 'image_center'
+            # centering the image on 2x2 pixels:
+            yy_s,xx_s = (np.mgrid[:pup_width,:pup_width]/(pup_width-1)-0.5)
+            offset = (-(xx_s+yy_s)*(pup_width-1)*2*np.pi/fft_width/2)
+        else:    
+            print('Assuming that the image is centered on 1 pixel at [N/2,N/2]')
+            self.image_center = 'fft_center'
+            offset = cp.zeros((pup_width,pup_width))
+
+        self._offset = cp.exp(1j*cp.pad(cp.array(offset),(self.fft_width-self.pup_width)//2))
+
+        # Set up the (hidden) parameters. These are all either scalars or cupy arrays.
         # Pupil in FFT dimensions:
         self._pup = cp.pad(cp.array(pup),(self.fft_width-pup.shape[0])//2) 
-        # Offset for (e.g.) centering the image on 2x2 pixels:
-        self._offset = cp.exp(1j*cp.pad(cp.array(offset),(self.fft_width-self.pup_width)//2))
     
         # Focal plane complex amplitude (real valued -- assuming symmetry in pupil):
         self._a = (cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(self._pup*self._offset)))).real / self._pup.sum() # focal plane amplitude
@@ -112,8 +123,12 @@ class FastAndFurious:
         p_i *= self._a2.sum() / p_i.sum()
 
         # odd/even decomposition:
-        p_io = 0.5*(p_i-p_i[::-1,::-1]) # odd component of image
-        p_ie = 0.5*(p_i+p_i[::-1,::-1]) # even component of image
+        if self.image_center == 'image_center':
+            p_io = 0.5*(p_i-p_i[::-1,::-1]) # odd component of image
+            p_ie = 0.5*(p_i+p_i[::-1,::-1]) # even component of image
+        else:
+            p_io = 0.5*(p_i-np.roll(p_i[::-1,::-1],(1,1),axis=(0,1))) # odd component of image
+            p_ie = 0.5*(p_i+np.roll(p_i[::-1,::-1],(1,1),axis=(0,1))) # even component of image
 
         # compute imaginary part of FFT(phase):
         y_i = self._a*p_io/self._ydenom # Eq (5) of Bos
@@ -124,7 +139,7 @@ class FastAndFurious:
             self._reset = False
         else:
             self._v_sign = cp.sign(self._p_de-p_ie-(self._v_d**2+self._y_d**2+2*y_i*self._y_d))*cp.sign(self._v_d) # Eq (9) of Bos, modified to avoid div by zero.
-            
+
         # compute abs(real part of FFT(phase)):
         v_i_abs = cp.sqrt(cp.abs(p_ie-(self._S*self._a2+y_i**2))) # Eq. (6) of Bos 
 
