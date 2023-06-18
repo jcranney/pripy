@@ -1,24 +1,40 @@
 #!/usr/bin/env python
 # coding: utf-8
-
+import sys
+sys.path.insert(0,'/home/marcos/PYTHON/pripy')
+import pripy
+print(pripy.__file__)
 import numpy as np
+import cupy as cp
 import matplotlib.pyplot as plt; 
 plt.ion()
+plt.close('all')
 from pripy import FastAndFurious
 from tqdm import tqdm
 from aotools import zernike
 
-# NOTE: the F&F algorithm assumes that a flat wavefront produces an image centered on the detector
-# e.g.,
-# 0 0 0 0
-# 0 1 1 0
-# 0 1 1 0
-# 0 0 0 0
+gain = 0.5
+leak = 0.99
+niter = 50
 
 # simulation parameters
 pup_width = 200
 fft_width = 512
 im_width = 20
+image_center = 'fft_center' # 'image_center' or 'fft_center'
+
+# NOTE: 
+# image_center = 'image_center'
+# 0 0 0 0
+# 0 1 1 0
+# 0 1 1 0
+# 0 0 0 0
+#
+# image_center = 'fft_center'
+# 0 0 0 0
+# 0 0 0 0
+# 0 0 1 0
+# 0 0 0 0
 
 # build (circular) pupil
 yy_s,xx_s = (np.mgrid[:pup_width,:pup_width]/(pup_width-1)-0.5)
@@ -29,6 +45,8 @@ pup_f = np.pad(pup_s,pad_by)
 
 # offset to get the image centred on 2x2 pixels
 phase_offset = (-(xx_s+yy_s)*(pup_width-1)*2*np.pi/fft_width/2)
+if image_center == 'fft_center':
+    phase_offset *= 0
 
 def phase_to_image(phi):
     """Take wavefront phase in small pupil dimensions and return image
@@ -93,32 +111,25 @@ phase_to_modes = np.linalg.solve(dphi.T @ dphi, dphi.T)[1:,:]
 # regularisation parameters
 epsilon = np.pad(np.ones([im_width,im_width])*1e-5,(fft_width-im_width)//2,mode='constant',constant_values=1e5)
 
-# create Fast and Furious instance
-ff = FastAndFurious(pup=pup_s,fft_width=pup_f.shape[0],
-                    im_width=im_width,offset=phase_offset,epsilon=epsilon)
-
-gain = 0.5
-leak = 0.99
-
-# This cell uses just the constant x over nbuffer
-niter = 50
-
 # correcting wavefront phase:
 phase_corr     = phase_s_0 * 0.0
 phase_corr_old = phase_s_0 * 0.0
-
 x_corr = np.zeros(nmodes)
+
+# create Fast and Furious instance
+ff = FastAndFurious(pup=pup_s,fft_width=pup_f.shape[0],
+                    im_width=im_width,epsilon=epsilon,image_center=image_center)
+ff._S = 0.9 # assumed Strehl of the image
+
+y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width)
+plt.matshow(y)
+plt.colorbar()
+plt.title("Initial Image")
 
 # uncorrected wavefront phase:
 plt.matshow(phase_s_0+get_phase(x_corr))
 plt.colorbar()
 plt.title("Initial Wavefront")
-
-# uncorrected image
-y = trim_im(phase_to_image(phase_s_0+get_phase(x_corr)),trimmed_width=im_width)
-plt.matshow(y)
-plt.colorbar()
-plt.title("Initial Image")
 
 err = []
 for i in tqdm(range(niter),leave=False):
