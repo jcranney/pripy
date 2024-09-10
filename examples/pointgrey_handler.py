@@ -16,58 +16,69 @@
 # THIS SOFTWARE OR ITS DERIVATIVES.
 # =============================================================================
 #
-# This AcquireAndDisplay.py shows how to get the image data, and then display images in a GUI.
-# This example relies on information provided in the ImageChannelStatistics.py example.
+# This AcquireAndDisplay.py shows how to get the image data, and then display
+# images in a GUI. This example relies on information provided in the
+# ImageChannelStatistics.py example.
 #
 # This example demonstrates how to display images represented as numpy arrays.
 # Currently, this program is limited to single camera use.
-# NOTE: keyboard and matplotlib must be installed on Python interpreter prior to running this example.
+# NOTE: keyboard and matplotlib must be installed on Python interpreter prior
+# to running this example.
 
-#import matplotlib.pyplot as plt; plt.ion()
-import sys
 import keyboard
 import PySpin
 import numpy as np
 
-class FakeCameraHandler:
 
-    def __init__(self,offset_x=900,offset_y=900,width=200,height=200,exposure=10000,gain=0):
-        self._cam_offset_x  = offset_x
-        self._cam_offset_y  = offset_y
-        self._cam_width     = width
-        self._cam_height    = height
+class FakeCameraHandler:
+    def __init__(
+        self, offset_x=900, offset_y=900, width=200, height=200,
+        exposure=10000, gain=0
+    ):
+        self._cam_offset_x = offset_x
+        self._cam_offset_y = offset_y
+        self._cam_width = width
+        self._cam_height = height
         self._exposure_time = exposure
-        self._gain          = gain
-    
+        self._gain = gain
+
     class FrameGrabber:
-        def __init__(self,cam_obj):
+        def __init__(self, cam_obj):
             self._cam_obj = cam_obj
 
         def __enter__(self):
             return self
 
-        def grab(self,nframes=1):
+        def grab(self, nframes=1):
             frames = []
             for _ in range(nframes):
-                frames.append(np.random.rand(*[self._cam_obj._cam_width,self._cam_obj._cam_height])*2**16)
+                frames.append(
+                    np.random.rand(*[
+                        self._cam_obj._cam_width,
+                        self._cam_obj._cam_height
+                    ])*2**16
+                )
             return frames
 
-        def __exit__(self,*args):
+        def __exit__(self, *args):
             pass
 
+
 class CameraHandler:
-    
     continue_recording = True
 
-    def __init__(self,offset_x=900,offset_y=900,width=200,height=200,exposure=10000,gain=0):
-        self._cam_offset_x  = offset_x
-        self._cam_offset_y  = offset_y
-        self._cam_width     = width
-        self._cam_height    = height
+    def __init__(
+        self, offset_x=900, offset_y=900, width=200, height=200,
+        exposure=10000, gain=0
+    ):
+        self._cam_offset_x = offset_x
+        self._cam_offset_y = offset_y
+        self._cam_width = width
+        self._cam_height = height
         self._exposure_time = exposure
-        self._gain          = gain
+        self._gain = gain
 
-    def handle_close(self,evt):
+    def handle_close(self, evt):
         """
         This function will close the GUI when close event happens.
 
@@ -85,8 +96,14 @@ class CameraHandler:
         :return: True if successful, False otherwise.
         :rtype: bool
         """
-        node_exposure_auto = PySpin.CEnumerationPtr(nodemap.GetNode('ExposureAuto'))
-        if not PySpin.IsReadable(node_exposure_auto) or not PySpin.IsWritable(node_exposure_auto):
+        node_exposure_auto = PySpin.CEnumerationPtr(
+            nodemap.GetNode('ExposureAuto')
+        )
+        if not PySpin.IsReadable(
+            node_exposure_auto
+        ) or not PySpin.IsWritable(
+            node_exposure_auto
+        ):
             return False
 
         exposure_auto_off = node_exposure_auto.GetEntryByName('Off')
@@ -96,7 +113,11 @@ class CameraHandler:
         node_exposure_auto.SetIntValue(exposure_auto_off.GetValue())
 
         node_gain_auto = PySpin.CEnumerationPtr(nodemap.GetNode('GainAuto'))
-        if not PySpin.IsReadable(node_gain_auto) or not PySpin.IsWritable(node_gain_auto):
+        if not PySpin.IsReadable(
+            node_gain_auto
+        ) or not PySpin.IsWritable(
+            node_gain_auto
+        ):
             return False
 
         gain_auto_off = node_gain_auto.GetEntryByName('Off')
@@ -104,11 +125,16 @@ class CameraHandler:
             return False
 
         node_gain_auto.SetIntValue(gain_auto_off.GetValue())
-        
-        node_pixel_format = PySpin.CEnumerationPtr(nodemap.GetNode('PixelFormat'))
-        if PySpin.IsReadable(node_pixel_format) and PySpin.IsWritable(node_pixel_format):
+
+        node_pixel_format = PySpin.CEnumerationPtr(
+            nodemap.GetNode('PixelFormat')
+        )
+        if PySpin.IsReadable(node_pixel_format) and \
+           PySpin.IsWritable(node_pixel_format):
             # Retrieve the desired entry node from the enumeration node
-            node_pixel_format_mono16 = PySpin.CEnumEntryPtr(node_pixel_format.GetEntryByName('Mono16'))
+            node_pixel_format_mono16 = PySpin.CEnumEntryPtr(
+                node_pixel_format.GetEntryByName('Mono16')
+            )
             if PySpin.IsReadable(node_pixel_format_mono16):
                 # Retrieve the integer value from the entry node
                 pixel_format_mono16 = node_pixel_format_mono16.GetValue()
@@ -120,32 +146,37 @@ class CameraHandler:
             print('Pixel format not readable or writable...')
 
         node_width = PySpin.CIntegerPtr(nodemap.GetNode('Width'))
-        if PySpin.IsReadable(node_width) and PySpin.IsWritable(node_width):
+        if PySpin.IsReadable(node_width) and \
+           PySpin.IsWritable(node_width):
             node_width.SetValue(self._cam_width)
         else:
             print('Width not readable or writable...')
 
         node_height = PySpin.CIntegerPtr(nodemap.GetNode('Height'))
-        if  PySpin.IsReadable(node_height) and PySpin.IsWritable(node_height):
+        if PySpin.IsReadable(node_height) and \
+           PySpin.IsWritable(node_height):
             node_height.SetValue(self._cam_height)
         else:
             print('Height not readable or writable...')
 
         node_offset_x = PySpin.CIntegerPtr(nodemap.GetNode('OffsetX'))
-        if PySpin.IsReadable(node_offset_x) and PySpin.IsWritable(node_offset_x):
+        if PySpin.IsReadable(node_offset_x) and \
+           PySpin.IsWritable(node_offset_x):
             node_offset_x.SetValue(self._cam_offset_x)
         else:
             print('Offset X not readable or writable...')
 
         node_offset_y = PySpin.CIntegerPtr(nodemap.GetNode('OffsetY'))
-        if PySpin.IsReadable(node_offset_y) and PySpin.IsWritable(node_offset_y):
+        if PySpin.IsReadable(node_offset_y) and \
+           PySpin.IsWritable(node_offset_y):
             node_offset_y.SetValue(self._cam_offset_y)
         else:
             print('Offset Y not readable or writable...')
-        
+
         # Set exposure time; exposure time recorded in microseconds
         node_exposure_time = PySpin.CFloatPtr(nodemap.GetNode('ExposureTime'))
-        if not PySpin.IsReadable(node_exposure_time) or not PySpin.IsWritable(node_exposure_time):
+        if not PySpin.IsReadable(node_exposure_time) or \
+           not PySpin.IsWritable(node_exposure_time):
             return False
 
         exposure_time_max = node_exposure_time.GetMax()
@@ -157,7 +188,8 @@ class CameraHandler:
 
         # Set gain; gain recorded in decibels
         node_gain = PySpin.CFloatPtr(nodemap.GetNode('Gain'))
-        if not PySpin.IsReadable(node_gain) or not PySpin.IsWritable(node_gain):
+        if not PySpin.IsReadable(node_gain) or \
+           not PySpin.IsWritable(node_gain):
             return False
 
         gain_max = node_gain.GetMax()
@@ -166,16 +198,18 @@ class CameraHandler:
             self._gain = gain_max
 
         node_gain.SetValue(self._gain)
-        
-        return True
 
+        return True
 
     def acquire_images(self, cam, nodemap, nodemap_tldevice):
         sNodemap = cam.GetTLStreamNodeMap()
 
         # Change bufferhandling mode to NewestOnly
-        node_bufferhandling_mode = PySpin.CEnumerationPtr(sNodemap.GetNode('StreamBufferHandlingMode'))
-        if not PySpin.IsReadable(node_bufferhandling_mode) or not PySpin.IsWritable(node_bufferhandling_mode):
+        node_bufferhandling_mode = PySpin.CEnumerationPtr(
+            sNodemap.GetNode('StreamBufferHandlingMode')
+        )
+        if not PySpin.IsReadable(node_bufferhandling_mode) or \
+           not PySpin.IsWritable(node_bufferhandling_mode):
             print('Unable to set stream buffer handling mode.. Aborting...')
             return False
 
@@ -193,21 +227,29 @@ class CameraHandler:
 
         print('*** IMAGE ACQUISITION ***\n')
         try:
-            node_acquisition_mode = PySpin.CEnumerationPtr(nodemap.GetNode('AcquisitionMode'))
-            if not PySpin.IsReadable(node_acquisition_mode) or not PySpin.IsWritable(node_acquisition_mode):
-                print('Unable to set acquisition mode to continuous (enum retrieval). Aborting...')
+            node_acquisition_mode = PySpin.CEnumerationPtr(
+                nodemap.GetNode('AcquisitionMode')
+            )
+            if not PySpin.IsReadable(node_acquisition_mode) or \
+               not PySpin.IsWritable(node_acquisition_mode):
+                print('Unable to set acquisition mode to continuous'
+                      ' (enum retrieval). Aborting...')
                 return False
 
             # Retrieve entry node from enumeration node
-            node_acquisition_mode_continuous = node_acquisition_mode.GetEntryByName('Continuous')
+            node_acquisition_mode_continuous = \
+                node_acquisition_mode.GetEntryByName('Continuous')
             if not PySpin.IsReadable(node_acquisition_mode_continuous):
-                print('Unable to set acquisition mode to continuous (entry retrieval). Aborting...')
+                print('Unable to set acquisition mode to continuous'
+                      ' (entry retrieval). Aborting...')
                 return False
 
             # Retrieve integer value from entry node
-            acquisition_mode_continuous = node_acquisition_mode_continuous.GetValue()
+            acquisition_mode_continuous = \
+                node_acquisition_mode_continuous.GetValue()
 
-            # Set integer value from entry node as new value of enumeration node
+            # Set integer value from entry node as new value of enumeration
+            # node
             node_acquisition_mode.SetIntValue(acquisition_mode_continuous)
 
             print('Acquisition mode set to continuous...')
@@ -215,10 +257,10 @@ class CameraHandler:
             #  Begin acquiring images
             #
             #  *** NOTES ***
-            #  What happens when the camera begins acquiring images depends on the
-            #  acquisition mode. Single frame captures only a single image, multi
-            #  frame catures a set number of images, and continuous captures a
-            #  continuous stream of images.
+            #  What happens when the camera begins acquiring images depends on
+            #  the acquisition mode. Single frame captures only a single image,
+            #  multi frame catures a set number of images, and continuous
+            #  captures a continuous stream of images.
             #
             #  *** LATER ***
             #  Image acquisition must be ended when no more images are needed.
@@ -229,60 +271,66 @@ class CameraHandler:
             #  Retrieve device serial number for filename
             #
             #  *** NOTES ***
-            #  The device serial number is retrieved in order to keep cameras from
-            #  overwriting one another. Grabbing image IDs could also accomplish
-            #  this.
+            #  The device serial number is retrieved in order to keep cameras
+            #  from overwriting one another. Grabbing image IDs could also
+            #  accomplish this.
             device_serial_number = ''
-            node_device_serial_number = PySpin.CStringPtr(nodemap_tldevice.GetNode('DeviceSerialNumber'))
+            node_device_serial_number = PySpin.CStringPtr(
+                nodemap_tldevice.GetNode('DeviceSerialNumber')
+            )
             if PySpin.IsReadable(node_device_serial_number):
                 device_serial_number = node_device_serial_number.GetValue()
-                print('Device serial number retrieved as %s...' % device_serial_number)
+                print(
+                    f'Device serial number retrieved as {device_serial_number}'
+                )
 
             # Close program
             print('Press enter to close the program..')
 
             # Retrieve and display images
-            while(self.continue_recording):
+            while self.continue_recording:
                 try:
-
                     #  Retrieve next received image
                     #
                     #  *** NOTES ***
-                    #  Capturing an image houses images on the camera buffer. Trying
-                    #  to capture an image that does not exist will hang the camera.
+                    #  Capturing an image houses images on the camera buffer.
+                    #  Trying to capture an image that does not exist will hang
+                    #  the camera.
                     #
                     #  *** LATER ***
                     #  Once an image from the buffer is saved and/or no longer
                     #  needed, the image must be released in order to keep the
                     #  buffer from filling up.
-                    
+
                     image_result = cam.GetNextImage(1000)
 
                     #  Ensure image completion
                     if image_result.IsIncomplete():
-                        print('Image incomplete with image status %d ...' % image_result.GetImageStatus())
+                        print(
+                            'Image incomplete with image status '
+                            f'{image_result.GetImageStatus():d}'
+                        )
 
-                    else:                    
-
+                    else:
                         # Getting the image data as a numpy array
                         image_data = image_result.GetNDArray()
-                        
+
                         if self._callback_function is not None:
                             # Pass image array to callback function
                             self._callback_function(image_data)
-                        
+
                         # If user presses enter, close the program
                         if keyboard.is_pressed('ENTER'):
                             print('Program is closing...')
                             input('Done! Press Enter to exit...')
-                            self.continue_recording=False                        
+                            self.continue_recording = False
 
                     #  Release image
                     #
                     #  *** NOTES ***
-                    #  Images retrieved directly from the camera (i.e. non-converted
-                    #  images) need to be released in order to keep from filling the
-                    #  buffer.
+                    #  Images retrieved directly from the camera (i.e.
+                    #  non-converted images) need to be released in order to
+                    #  keep from filling the buffer.
                     image_result.Release()
 
                 except PySpin.SpinnakerException as ex:
@@ -292,8 +340,9 @@ class CameraHandler:
             #  End acquisition
             #
             #  *** NOTES ***
-            #  Ending acquisition appropriately helps ensure that devices clean up
-            #  properly and do not need to be power-cycled to maintain integrity.
+            #  Ending acquisition appropriately helps ensure that devices clean
+            #  up properly and do not need to be power-cycled to maintain
+            #  integrity.
             cam.EndAcquisition()
 
         except PySpin.SpinnakerException as ex:
@@ -304,9 +353,9 @@ class CameraHandler:
 
     def print_device_info(self, nodemap):
         """
-        This function prints the device information of the camera from the transport
-        layer; please see NodeMapInfo example for more in-depth comments on printing
-        device information from the nodemap.
+        This function prints the device information of the camera from the
+        transport layer; please see NodeMapInfo example for more in-depth
+        comments on printing device information from the nodemap.
 
         :param nodemap: Transport layer device nodemap.
         :type nodemap: INodeMap
@@ -318,14 +367,22 @@ class CameraHandler:
 
         try:
             result = True
-            node_device_information = PySpin.CCategoryPtr(nodemap.GetNode('DeviceInformation'))
+            node_device_information = PySpin.CCategoryPtr(
+                nodemap.GetNode('DeviceInformation')
+            )
 
             if PySpin.IsReadable(node_device_information):
                 features = node_device_information.GetFeatures()
                 for feature in features:
                     node_feature = PySpin.CValuePtr(feature)
-                    print('%s: %s' % (node_feature.GetName(),
-                                    node_feature.ToString() if PySpin.IsReadable(node_feature) else 'Node not readable'))
+                    print(
+                        f'{node_feature.GetName()}:, '
+                        f'{
+                            node_feature.ToString()
+                            if PySpin.IsReadable(node_feature)
+                            else "Node not readable"
+                        }'
+                    )
 
             else:
                 print('Device control information not readable.')
@@ -338,8 +395,8 @@ class CameraHandler:
 
     def run_single_camera(self, cam):
         """
-        This function acts as the body of the example; please see NodeMapInfo example
-        for more in-depth comments on setting up cameras.
+        This function acts as the body of the example; please see NodeMapInfo
+        example for more in-depth comments on setting up cameras.
 
         :param cam: Camera to run on.
         :type cam: CameraPtr
@@ -352,7 +409,7 @@ class CameraHandler:
             nodemap_tldevice = cam.GetTLDeviceNodeMap()
 
             result &= self.print_device_info(nodemap_tldevice)
-            
+
             # Initialize camera
             cam.Init()
 
@@ -375,7 +432,7 @@ class CameraHandler:
         return result
 
     class FrameGrabber:
-        def __init__(self,cam_obj):
+        def __init__(self, cam_obj):
             self._cam_obj = cam_obj
 
         def __enter__(self):
@@ -398,7 +455,7 @@ class CameraHandler:
 
                 print('Not enough cameras!')
                 input('Done! Press Enter to exit...')
-            
+
             self.cam_list = cam_list
             cam = cam_list[0]
             self.cam = cam
@@ -418,43 +475,65 @@ class CameraHandler:
             sNodemap = cam.GetTLStreamNodeMap()
 
             # Change bufferhandling mode to NewestOnly
-            node_bufferhandling_mode = PySpin.CEnumerationPtr(sNodemap.GetNode('StreamBufferHandlingMode'))
-            if not PySpin.IsReadable(node_bufferhandling_mode) or not PySpin.IsWritable(node_bufferhandling_mode):
-                print('Unable to set stream buffer handling mode.. Aborting...')
+            node_bufferhandling_mode = PySpin.CEnumerationPtr(
+                sNodemap.GetNode('StreamBufferHandlingMode')
+            )
+            if not PySpin.IsReadable(node_bufferhandling_mode) or \
+               not PySpin.IsWritable(node_bufferhandling_mode):
+                print(
+                    'Unable to set stream buffer handling mode.. Aborting...'
+                )
                 return False
 
             # Retrieve entry node from enumeration node
-            node_newestonly = node_bufferhandling_mode.GetEntryByName('NewestOnly')
+            node_newestonly = node_bufferhandling_mode.GetEntryByName(
+                'NewestOnly'
+            )
             if not PySpin.IsReadable(node_newestonly):
-                print('Unable to set stream buffer handling mode.. Aborting...')
+                print(
+                    'Unable to set stream buffer handling mode.. Aborting...'
+                )
                 return False
 
             # Retrieve integer value from entry node
             node_newestonly_mode = node_newestonly.GetValue()
 
-            # Set integer value from entry node as new value of enumeration node
+            # Set integer value from entry node as new value of enumeration
+            # node
             node_bufferhandling_mode.SetIntValue(node_newestonly_mode)
 
-            node_acquisition_mode = PySpin.CEnumerationPtr(nodemap.GetNode('AcquisitionMode'))
-            if not PySpin.IsReadable(node_acquisition_mode) or not PySpin.IsWritable(node_acquisition_mode):
-                print('Unable to set acquisition mode to continuous (enum retrieval). Aborting...')
+            node_acquisition_mode = PySpin.CEnumerationPtr(
+                nodemap.GetNode('AcquisitionMode')
+            )
+            if not PySpin.IsReadable(node_acquisition_mode) or \
+               not PySpin.IsWritable(node_acquisition_mode):
+                print(
+                    'Unable to set acquisition mode to continuous '
+                    '(enum retrieval). Aborting...'
+                )
                 return False
 
             # Retrieve entry node from enumeration node
-            node_acquisition_mode_continuous = node_acquisition_mode.GetEntryByName('Continuous')
+            node_acquisition_mode_continuous = \
+                node_acquisition_mode.GetEntryByName('Continuous')
             if not PySpin.IsReadable(node_acquisition_mode_continuous):
-                print('Unable to set acquisition mode to continuous (entry retrieval). Aborting...')
+                print(
+                    'Unable to set acquisition mode to continuous '
+                    '(entry retrieval). Aborting...'
+                )
                 return False
 
             # Retrieve integer value from entry node
-            acquisition_mode_continuous = node_acquisition_mode_continuous.GetValue()
+            acquisition_mode_continuous = \
+                node_acquisition_mode_continuous.GetValue()
 
-            # Set integer value from entry node as new value of enumeration node
+            # Set integer value from entry node as new value of enumeration
+            # node
             node_acquisition_mode.SetIntValue(acquisition_mode_continuous)
 
             return self
 
-        def grab(self,nframes=1):
+        def grab(self, nframes=1):
             frames = []
             self.cam.BeginAcquisition()
             # Retrieve and display images
@@ -462,18 +541,21 @@ class CameraHandler:
                 image_result = self.cam.GetNextImage(1000)
                 #  Ensure image completion
                 if image_result.IsIncomplete():
-                    print('Image incomplete with image status %d ...' % image_result.GetImageStatus())
-                else:                    
+                    print(
+                        'Image incomplete with image status '
+                        f'{image_result.GetImageStatus():d}'
+                    )
+                else:
                     # Getting the image data as a numpy array
                     frames.append(image_result.GetNDArray().copy())
                 image_result.Release()
             self.cam.EndAcquisition()
             return frames
 
-        def __exit__(self,*args):
+        def __exit__(self, *args):
             # Deinitialize camera
             self.cam_list[0].DeInit()
-            del self.cam 
+            del self.cam
 
             # Clear camera list before releasing system
             self.cam_list.Clear()
@@ -481,9 +563,12 @@ class CameraHandler:
             # Release system instance
             self.system.ReleaseInstance()
 
+
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
     plt.ion()
-    cam = CameraHandler(offset_x=200,offset_y=300,width=40,height=40)
+    cam = CameraHandler(
+        offset_x=200, offset_y=300, width=40, height=40
+    )
     with cam.FrameGrabber(cam) as fg:
         plt.matshow(fg.grab()[0])
