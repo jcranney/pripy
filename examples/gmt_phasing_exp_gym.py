@@ -5,7 +5,7 @@ import gymnasium as gym
 import segment_phasing_fp_env  # noqa: F401
 from segment_phasing_fp_env import psf
 from tqdm import tqdm
-from pripy.pripy.algos import MHE
+from pripy.algos import MHE
 
 # number of previous states to consider in MHE
 NBUFFER: int = 2
