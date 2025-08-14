@@ -334,7 +334,7 @@ class MHE:
         xopt = opt.least_squares(
             lambda x: self.cost_vector(x, x_dm, yd),
             x0,
-            # method="lm",
+            method="lm",
         )
         return xopt["x"][-self._nstate:]
 
