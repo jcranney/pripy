@@ -8,7 +8,7 @@ from tqdm import tqdm
 from pripy.algos import MHE
 
 # number of previous states to consider in MHE
-NBUFFER: int = 3
+NBUFFER: int = 5
 # filter gain, can be up to 1.0 and still stable
 GAIN: float = 1.0
 
@@ -51,7 +51,7 @@ if __name__ == "__main__":
         # pseudo-open-loop), therefore, the action is the "incremental"
         # command:
         action = com - old_com
-        
+
         # grab a frame
         frame, reward, terminated, truncated, info = env.step(action)
 
