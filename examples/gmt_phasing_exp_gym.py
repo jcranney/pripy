@@ -8,9 +8,9 @@ from tqdm import tqdm
 from pripy.algos import MHE
 
 # number of previous states to consider in MHE
-NBUFFER: int = 2
+NBUFFER: int = 3
 # filter gain, can be up to 1.0 and still stable
-GAIN: float = 0.5
+GAIN: float = 1.0
 
 if __name__ == "__main__":
     # create a model to be used for calibrating controller
@@ -37,6 +37,7 @@ if __name__ == "__main__":
 
     # initialise variables
     frames = []
+    strehl = []
     x0 = np.zeros([NBUFFER, nmodes]).flatten()
     x_dm = np.zeros([NBUFFER, nmodes]).flatten()
     yd = np.zeros([NBUFFER, nmeas])
@@ -61,6 +62,7 @@ if __name__ == "__main__":
         x_dm[-nmodes:] = com
         old_com = com.copy()
         frames.append(frame)
+        strehl.append(info["se_strehl"])
         pbar.set_description(
             f"reward: {reward:0.3e}, se sr: {info['se_strehl']:0.3f}"
         )
@@ -71,6 +73,10 @@ if __name__ == "__main__":
             x_hat = ctrl.get_estimate(x0, x_dm, yd)
             # update the command based on the estimate
             com = (1 - GAIN) * com - GAIN * x_hat
+            # update the initial estimate for next iteration
+            x0[:-nmodes] = x0[nmodes:]
+            x0[-nmodes:] = x_hat
 
     # save frames for review
     np.save("frames.npy", np.array(frames))
+    np.save("strehl.npy", np.array(strehl))
