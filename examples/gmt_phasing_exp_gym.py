@@ -8,7 +8,7 @@ from tqdm import tqdm
 from pripy.algos import MHE
 
 # number of previous states to consider in MHE
-NBUFFER: int = 5
+NBUFFER: int = 2
 # filter gain, can be up to 1.0 and still stable
 GAIN: float = 1.0
 
