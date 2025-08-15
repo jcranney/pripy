@@ -8,9 +8,9 @@ from tqdm import tqdm
 from pripy.algos import MHE
 
 # number of previous states to consider in MHE
-NBUFFER: int = 2
+NBUFFER: int = 3
 # filter gain, can be up to 1.0 and still stable
-GAIN: float = 1.0
+GAIN: float = 0.2
 
 if __name__ == "__main__":
     # create a model to be used for calibrating controller
