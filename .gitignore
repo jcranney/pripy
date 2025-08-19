@@ -133,3 +133,6 @@ dmypy.json
 # images probably used for debugging/generating results
 *.png
 *.gif
+
+#intellij
+.idea/

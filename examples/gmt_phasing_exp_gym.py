@@ -3,7 +3,8 @@
 import numpy as np
 import gymnasium as gym
 import segment_phasing_fp_env  # noqa: F401
-from segment_phasing_fp_env import psf
+from segment_phasing_fp_env import psf_autodiff as psf
+# from segment_phasing_fp_env import psf
 from tqdm import tqdm
 from pripy.algos import MHE
 
@@ -14,7 +15,7 @@ GAIN: float = 0.2
 
 if __name__ == "__main__":
     # create a model to be used for calibrating controller
-    model = psf.PSF(ideal=True)
+    model = psf.PSFAutoDiff(ideal=True)
     model.state *= 0.0
     model.command *= 0.0
     # build controller
@@ -80,3 +81,25 @@ if __name__ == "__main__":
     # save frames for review
     np.save("frames.npy", np.array(frames))
     np.save("strehl.npy", np.array(strehl))
+
+    # Plot results automatically
+    import matplotlib
+
+    matplotlib.use("TkAgg")
+    import matplotlib.pyplot as plt
+
+    # plot Strehl ratio over iterations
+    plt.figure()
+    plt.plot(strehl)
+    plt.xlabel("Iteration")
+    plt.ylabel("Strehl ratio")
+    plt.title("MHE Simulation Strehl ratio")
+    plt.grid(True)
+    plt.show()
+
+    # show the final frame
+    plt.figure()
+    plt.imshow(frames[-1], cmap="viridis")
+    plt.colorbar()
+    plt.title("Final Frame")
+    plt.show()
