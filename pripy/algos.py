@@ -320,20 +320,34 @@ class MHE:
         cost = np.r_[cost, self._gamma_factor @ x]
         return cost
 
+    def _finite_diff_jac(self, f, x, eps=1e-6):
+        """Central difference Jacobian of f at x."""
+        x = np.asarray(x, dtype=float)
+        y0 = f(x)
+        m = y0.size
+        n = x.size
+        J = np.zeros((m, n))
+        for j in range(n):
+            dx = np.zeros_like(x)
+            dx[j] = eps
+            y_plus = f(x + dx)
+            y_minus = f(x - dx)
+            J[:, j] = (y_plus - y_minus) / (2 * eps)
+        return J
+
     def get_estimate(self, x0, x_dm, yd):
-        """Get the current estimate of the state based on recent priors.
+        """Get the current estimate of the state based on recent priors."""
 
-        Args:
-            x0 (np.ndarray): Initial state estimate (best guess)
-            x_dm (np.ndarray): dm sequence (N,NSTATE)
-            yd (np.ndarray): Measurement sequence (N,NMEAS)
+        def rfun(z):
+            return self.cost_vector(z, x_dm, yd)
 
-        Returns:
-            np.ndarray: Current state estimate
-        """
+        def jfun(z):
+            return self._finite_diff_jac(rfun, z)
+
         xopt = opt.least_squares(
-            lambda x: self.cost_vector(x, x_dm, yd),
+            rfun,
             x0,
+            jac=jfun,  # Jacobiant
             method="lm",
         )
         return xopt["x"][-self._nstate:]
