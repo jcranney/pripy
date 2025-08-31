@@ -1,15 +1,15 @@
+import warnings
+
 try:
     import cupy as cp  # type: ignore
 except ImportError:
-    Warning("No cupy available, using basic numpy")
+    warnings.warn("No cupy available, using basic numpy")
     import numpy as cp
 
 import numpy as np
-
 import scipy.optimize as opt
 from collections.abc import Callable
 from segment_phasing_fp_env.psf import PSF
-
 
 class FastAndFurious:
     """Fast and Furious is a class for computing the phase of a wavefront
@@ -156,10 +156,10 @@ class FastAndFurious:
             p_ie = 0.5 * (p_i + p_i[::-1, ::-1])  # even component of image
         else:
             p_io = 0.5 * (
-                p_i - np.roll(p_i[::-1, ::-1], (1, 1), axis=(0, 1))
+                p_i - cp.roll(p_i[::-1, ::-1], (1, 1), axis=(0, 1))
             )  # odd component of image
             p_ie = 0.5 * (
-                p_i + np.roll(p_i[::-1, ::-1], (1, 1), axis=(0, 1))
+                p_i + cp.roll(p_i[::-1, ::-1], (1, 1), axis=(0, 1))
             )  # even component of image
 
         # compute imaginary part of FFT(phase):
@@ -248,14 +248,14 @@ class MHE:
     """Moving Horizon Estimator"""
 
     def __init__(
-        self,
-        nstate: int,
-        nmeas: int,
-        nbuffer: int,
-        noise_cov: np.ndarray,
-        state_cov: np.ndarray,
-        state_matrix: np.ndarray,
-        h_eval: Callable,
+            self,
+            nstate: int,
+            nmeas: int,
+            nbuffer: int,
+            noise_cov: np.ndarray,
+            state_cov: np.ndarray,
+            state_matrix: np.ndarray,
+            h_eval: Callable,
     ):
         """Initialise the estimator"""
         self._nstate = nstate  # len(x)
@@ -320,20 +320,6 @@ class MHE:
         cost = np.r_[cost, self._gamma_factor @ x]
         return cost
 
-    def _finite_diff_jac(self, f, x, eps=1e-6):
-        """Central difference Jacobian of f at x."""
-        x = np.asarray(x, dtype=float)
-        y0 = f(x)
-        m = y0.size
-        n = x.size
-        J = np.zeros((m, n))
-        for j in range(n):
-            dx = np.zeros_like(x)
-            dx[j] = eps
-            y_plus = f(x + dx)
-            y_minus = f(x - dx)
-            J[:, j] = (y_plus - y_minus) / (2 * eps)
-        return J
 
     def get_estimate(self, x0, x_dm, yd):
         """Get the current estimate of the state based on recent priors."""
@@ -341,15 +327,12 @@ class MHE:
         def rfun(z):
             return self.cost_vector(z, x_dm, yd)
 
-        def jfun(z):
-            return self._finite_diff_jac(rfun, z)
-
         xopt = opt.least_squares(
             rfun,
             x0,
-            jac=jfun,  # Jacobiant
-            method="lm",
-        )
+            jac = "3-point",  # use SciPy's built-in finite-difference Jacobian
+            method = "lm",
+                )
         return xopt["x"][-self._nstate:]
 
     @staticmethod
@@ -366,7 +349,7 @@ class MHE:
             noise_cov=noise_cov,
             state_cov=state_cov,
             state_matrix=state_matrix,
-            h_eval=lambda x: model.poke(x).flatten(),
+            h_eval=lambda x: np.asarray(model.poke(x)).flatten(),
         )
 
 
