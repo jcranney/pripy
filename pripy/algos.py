@@ -6,10 +6,18 @@ except ImportError:
     warnings.warn("No cupy available, using basic numpy")
     import numpy as cp
 
+try:
+    import jax
+    import jax.numpy as jnp
+    _JAX_AVAILABLE = True
+except Exception:
+    _JAX_AVAILABLE = False
+
 import numpy as np
 import scipy.optimize as opt
 from collections.abc import Callable
 from segment_phasing_fp_env.psf import PSF
+
 
 class FastAndFurious:
     """Fast and Furious is a class for computing the phase of a wavefront
@@ -49,16 +57,6 @@ class FastAndFurious:
         Compute the phase of the wavefront from an image.
     set_diversity_phase(dphi)
         Set the diversity phase.
-
-    ### References
-    # Bos et al., On-sky verification of Fast and Furious focal-plane wavefront
-    #  sensing: Moving forward toward controlling the island effect at
-    # Subaru/SCExAO https://doi.org/10.1051/0004-6361/202037910
-    # (we will use the equation numbers from the paper)
-
-    # Original paper is harder to follow and also has an error in one of the
-    # equations: Keller et al, Extremely fast focal-plane wavefront sensing for
-    # extreme adaptive optics, https://arxiv.org/pdf/1207.3273.pdf
     """
 
     def __init__(
@@ -244,6 +242,42 @@ class FastAndFurious:
         ).real
 
 
+# --- JAX helper (global): build a differentiable h_eval from PSF ----------------
+def make_h_eval_jax(psf_obj: PSF):
+    """
+    Build a JAX-differentiable measurement function h_eval(x) from a PSF instance.
+    The function maps state x -> noiseless, rebinned image (flattened).
+    """
+    assert _JAX_AVAILABLE, "JAX is required for autodiff-based Jacobian."
+
+    modes_j = jnp.asarray(psf_obj.modes)    # (nmodes, P)
+    dft_j   = jnp.asarray(psf_obj.dft)      # (F, P), F = side*side
+    ref_max = jnp.asarray(psf_obj.ref_max)  # scalar
+
+    F = int(dft_j.shape[0])
+    side = int(np.sqrt(F))
+    assert side * side == F, "DFT length must be a perfect square."
+    REBIN = 2
+    out_side = side // REBIN
+
+    def _rebin2(a):
+        a = a.reshape(out_side, REBIN, out_side, REBIN)
+        return a.mean(axis=3).mean(axis=1)
+
+    @jax.jit
+    def h_eval(x):
+        # x: (nmodes,)
+        phi = jnp.einsum("ip,i->p", modes_j, x)
+        psi = jnp.exp(1j * phi)
+        psi_out = jnp.einsum("fp,p->f", dft_j, psi)
+        psf = (jnp.abs(psi_out) ** 2).reshape((side, side)) / ref_max
+        img = _rebin2(psf).reshape((-1,))
+        return img
+
+    return h_eval
+# -------------------------------------------------------------------------------
+
+
 class MHE:
     """Moving Horizon Estimator"""
 
@@ -301,11 +335,12 @@ class MHE:
             noise_cov_inv
         ).T  # maybe no transpose?
 
+        if _JAX_AVAILABLE:
+            self._gamma_factor_jax = jnp.asarray(self._gamma_factor)
+            self._noise_cov_inv_factor_jax = jnp.asarray(self._noise_cov_inv_factor)
+
     def cost_vector(self, x, x_dm, yd):
-        """Evaluate MHE cost vector (vector of residuals to be square-summed
-        for actual cost function, or fed into a "least-squares" optimiser for
-        state, x, measurements, yd, and dm sequence, x_dm.
-        """
+        """Evaluate MHE cost vector (NumPy version for fallback)."""
         h = np.r_[
             [
                 self._h_eval(
@@ -320,19 +355,72 @@ class MHE:
         cost = np.r_[cost, self._gamma_factor @ x]
         return cost
 
+    def _cost_vector_jax(self, x, x_dm, yd):
+        """JAX version of MHE residual vector. All inputs are jnp arrays."""
+        h_list = []
+        for i in range(self._nbuffer):
+            xi = x[self._nstate * i: self._nstate * (i + 1)]
+            dmi = x_dm[self._nstate * i: self._nstate * (i + 1)]
+            h_list.append(self._h_eval(xi + dmi))
+        h = jnp.stack(h_list, axis=0)  # (nbuffer, nmeas)
+
+        res_meas = []
+        for i in range(self._nbuffer):
+            res_meas.append(self._noise_cov_inv_factor_jax @ (h[i] - yd[i]))
+        res_meas = jnp.concatenate(res_meas, axis=0)  # (nbuffer*nmeas,)
+
+        res_prior = self._gamma_factor_jax @ x  # (nbuffer*nstate,)
+        return jnp.concatenate([res_meas, res_prior], axis=0)
 
     def get_estimate(self, x0, x_dm, yd):
         """Get the current estimate of the state based on recent priors."""
 
-        def rfun(z):
+        def rfun_np(z):
+            # NumPy residual for fallback path (keeps current behavior)
             return self.cost_vector(z, x_dm, yd)
 
-        xopt = opt.least_squares(
-            rfun,
-            x0,
-            jac = "3-point",  # use SciPy's built-in finite-difference Jacobian
-            method = "lm",
+        if _JAX_AVAILABLE:
+            try:
+                x_dm_j = jnp.asarray(x_dm)
+                yd_j = jnp.asarray(yd)
+
+                def rfun_jax(z):
+                    z = jnp.asarray(z)
+                    return self._cost_vector_jax(z, x_dm_j, yd_j)
+
+                # JIT-compile residual and its Jacobian (forward-mode good when m >> n)
+                rfun_jit = jax.jit(rfun_jax)
+                jac_jit = jax.jit(jax.jacfwd(rfun_jax))
+
+                def res_for_scipy(z):
+                    return np.asarray(rfun_jit(jnp.asarray(z)))
+
+                def jac_for_scipy(z):
+                    return np.asarray(jac_jit(jnp.asarray(z)))
+
+                # Warm up compilation once
+                _ = res_for_scipy(x0)
+                _ = jac_for_scipy(x0)
+
+                xopt = opt.least_squares(
+                    res_for_scipy,
+                    x0,
+                    jac=jac_for_scipy,   # JAX autodiff-based Jacobian
+                    method="lm",
                 )
+                return xopt["x"][-self._nstate:]
+            except Exception as _e:
+                warnings.warn(
+                    f"JAX autodiff Jacobian unavailable; falling back to SciPy 3-point. Reason: {_e}"
+                )
+
+        # Fallback: SciPy finite-difference Jacobian (original behavior)
+        xopt = opt.least_squares(
+            rfun_np,
+            x0,
+            jac="3-point",
+            method="lm",
+        )
         return xopt["x"][-self._nstate:]
 
     @staticmethod

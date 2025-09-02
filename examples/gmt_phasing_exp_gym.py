@@ -6,7 +6,8 @@ import segment_phasing_fp_env  # noqa: F401
 from segment_phasing_fp_env import psf_autodiff as psf
 # from segment_phasing_fp_env import psf
 from tqdm import tqdm
-from pripy.algos import MHE
+from pripy.algos import MHE, make_h_eval_jax
+import jax.numpy as jnp
 
 # number of previous states to consider in MHE
 NBUFFER: int = 3
@@ -19,7 +20,21 @@ if __name__ == "__main__":
     model.state *= 0.0
     model.command *= 0.0
     # build controller
-    ctrl = MHE.from_model(model, nbuffer=NBUFFER)
+    nstate = model.state.shape[0]
+    h_eval = make_h_eval_jax(model)
+    nmeas = int(h_eval(jnp.zeros((nstate,), dtype=jnp.float32)).size)
+    noise_cov = np.eye(nmeas) * (getattr(model, "noise", 0.5) ** 2)
+    state_cov = np.eye(nstate) * (getattr(model, "sigma", 1.0) ** 2)
+    state_matrix = np.eye(nstate) * getattr(model, "corr", 0.99)
+    ctrl = MHE(
+        nstate=nstate,
+        nmeas=nmeas,
+        nbuffer=NBUFFER,
+        noise_cov=noise_cov,
+        state_cov=state_cov,
+        state_matrix=state_matrix,
+        h_eval=h_eval,
+    )
 
     # make environment
     env = gym.make("SegmentPhasingFP-v0")
