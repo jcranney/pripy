@@ -1,6 +1,35 @@
+[project]
+name = "pripy"
+version = "0.1.8"
+description = "Phase Retrieval algorithms in Python"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "aotools",
+    "torch",
+    "gym",
+    "gymnasium",
+    "pygame",
+    "ipython",
+    "matplotlib",
+    "segment-phasing-fp-env",
+    "tqdm",
+]
+
 [build-system]
 requires = [
-    "setuptools>=54",
+    "setuptools>=80.9.0",
     "wheel"
 ]
 build-backend = "setuptools.build_meta"
+
+[options]
+include_package_data = true
+
+[tool.setuptools]
+packages = ["pripy"]
+
+[tool.uv.sources]
+segment-phasing-fp-env = { git = "https://github.com/jcranney/segment-phasing-fp-env", rev = "autodiff" }
