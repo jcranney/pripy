@@ -2,12 +2,17 @@
 
 import numpy as np
 import gymnasium as gym
-import segment_phasing_fp_env  # noqa: F401
+import segment_phasing_fp_env  # noqa: F401 <- needed for gymnasium
 from segment_phasing_fp_env import psf_autodiff as psf
 # from segment_phasing_fp_env import psf
 from tqdm import tqdm
 from pripy.algos import MHE
-import jax.numpy as jnp
+# Plot results automatically
+import matplotlib
+import matplotlib.pyplot as plt
+
+matplotlib.use("TkAgg")
+
 
 # number of previous states to consider in MHE
 NBUFFER: int = 3
@@ -21,7 +26,6 @@ if __name__ == "__main__":
     model.command *= 0.0
     # build controller
     ctrl = MHE.from_model(model, nbuffer=NBUFFER, use_jax=True)
-
 
     # make environment
     env = gym.make("SegmentPhasingFP-v0")
@@ -83,12 +87,6 @@ if __name__ == "__main__":
     # save frames for review
     np.save("frames.npy", np.array(frames))
     np.save("strehl.npy", np.array(strehl))
-
-    # Plot results automatically
-    import matplotlib
-
-    matplotlib.use("TkAgg")
-    import matplotlib.pyplot as plt
 
     # plot Strehl ratio over iterations
     plt.figure()
