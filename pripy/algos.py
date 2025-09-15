@@ -242,42 +242,6 @@ class FastAndFurious:
         ).real
 
 
-# --- JAX helper (global): build a differentiable h_eval from PSF ----------------
-def make_h_eval_jax(psf_obj: PSF):
-    """
-    Build a JAX-differentiable measurement function h_eval(x) from a PSF instance.
-    The function maps state x -> noiseless, rebinned image (flattened).
-    """
-    assert _JAX_AVAILABLE, "JAX is required for autodiff-based Jacobian."
-
-    modes_j = jnp.asarray(psf_obj.modes)    # (nmodes, P)
-    dft_j   = jnp.asarray(psf_obj.dft)      # (F, P), F = side*side
-    ref_max = jnp.asarray(psf_obj.ref_max)  # scalar
-
-    F = int(dft_j.shape[0])
-    side = int(np.sqrt(F))
-    assert side * side == F, "DFT length must be a perfect square."
-    REBIN = 2
-    out_side = side // REBIN
-
-    def _rebin2(a):
-        a = a.reshape(out_side, REBIN, out_side, REBIN)
-        return a.mean(axis=3).mean(axis=1)
-
-    @jax.jit
-    def h_eval(x):
-        # x: (nmodes,)
-        phi = jnp.einsum("ip,i->p", modes_j, x)
-        psi = jnp.exp(1j * phi)
-        psi_out = jnp.einsum("fp,p->f", dft_j, psi)
-        psf = (jnp.abs(psi_out) ** 2).reshape((side, side)) / ref_max
-        img = _rebin2(psf).reshape((-1,))
-        return img
-
-    return h_eval
-# -------------------------------------------------------------------------------
-
-
 class MHE:
     """Moving Horizon Estimator"""
 
@@ -421,15 +385,26 @@ class MHE:
             jac="3-point",
             method="lm",
         )
+
         return xopt["x"][-self._nstate:]
 
     @staticmethod
-    def from_model(model: PSF, *, nbuffer: int = 10):
+    def from_model(model: PSF, *, nbuffer: int = 10, use_jax: bool = True):
         nmeas = model.image.flatten().shape[0]
         nstate = model.nmodes
-        noise_cov = np.eye(nmeas) * model.noise**2
-        state_cov = np.eye(nstate) * model.sigma**2
+        noise_cov = np.eye(nmeas) * model.noise ** 2
+        state_cov = np.eye(nstate) * model.sigma ** 2
         state_matrix = np.eye(nstate) * model.corr
+
+        if use_jax and _JAX_AVAILABLE and hasattr(model, "get_h_eval_jax"):
+            # Use the model's own JAX-traceable h(x) to preserve OO design
+            print("Jax")
+            h_eval_fn = model.get_h_eval_jax()
+        else:
+            # Fallback: NumPy forward model (no autodiff)
+            print("Numpy")
+            h_eval_fn = lambda x: np.asarray(model.poke(x)).flatten()
+
         return MHE(
             nstate=nstate,
             nmeas=nmeas,
@@ -437,7 +412,7 @@ class MHE:
             noise_cov=noise_cov,
             state_cov=state_cov,
             state_matrix=state_matrix,
-            h_eval=lambda x: np.asarray(model.poke(x)).flatten(),
+            h_eval=h_eval_fn,
         )
 
 
