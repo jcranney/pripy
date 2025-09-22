@@ -302,6 +302,9 @@ class MHE:
         if _JAX_AVAILABLE:
             self._gamma_factor_jax = jnp.asarray(self._gamma_factor)
             self._noise_cov_inv_factor_jax = jnp.asarray(self._noise_cov_inv_factor)
+            self._h_eval_batched = jax.jit(jax.vmap(h_eval, in_axes=(0,)))
+            self._rfun_compiled = None
+            self._jac_compiled = None
 
     def cost_vector(self, x, x_dm, yd):
         """Evaluate MHE cost vector (NumPy version for fallback)."""
@@ -312,29 +315,28 @@ class MHE:
                 )
                 for i in range(self._nbuffer)
             ]
-        ]
-        cost = np.r_[
-            [self._noise_cov_inv_factor @ (hi - ydi) for hi, ydi in zip(h, yd)]
-        ].flatten()
-        cost = np.r_[cost, self._gamma_factor @ x]
+        ].reshape(self._nbuffer, self._nmeas)  # (B, nmeas)
+
+        res_meas = (self._noise_cov_inv_factor @ (h - yd).T).T  # (B, nmeas)
+
+        cost = np.r_[res_meas.reshape(-1), self._gamma_factor @ x]
         return cost
 
     def _cost_vector_jax(self, x, x_dm, yd):
         """JAX version of MHE residual vector. All inputs are jnp arrays."""
-        h_list = []
-        for i in range(self._nbuffer):
-            xi = x[self._nstate * i: self._nstate * (i + 1)]
-            dmi = x_dm[self._nstate * i: self._nstate * (i + 1)]
-            h_list.append(self._h_eval(xi + dmi))
-        h = jnp.stack(h_list, axis=0)  # (nbuffer, nmeas)
+        B, ns, nm = self._nbuffer, self._nstate, self._nmeas
 
-        res_meas = []
-        for i in range(self._nbuffer):
-            res_meas.append(self._noise_cov_inv_factor_jax @ (h[i] - yd[i]))
-        res_meas = jnp.concatenate(res_meas, axis=0)  # (nbuffer*nmeas,)
+        x_b = x.reshape(B, ns)  # (B, nstate)
+        dm_b = jnp.asarray(x_dm).reshape(B, ns)  # (B, nstate)
+        y_b = jnp.asarray(yd).reshape(B, nm)  # (B, nmeas)
 
-        res_prior = self._gamma_factor_jax @ x  # (nbuffer*nstate,)
-        return jnp.concatenate([res_meas, res_prior], axis=0)
+        yhat = self._h_eval_batched(x_b + dm_b)  # (B, nmeas)
+
+        res_meas = (self._noise_cov_inv_factor_jax @ (yhat - y_b).T).T  # (B, nmeas)
+
+        res_prior = self._gamma_factor_jax @ x  # (B*ns,)
+
+        return jnp.concatenate([res_meas.reshape(-1), res_prior], axis=0)
 
     def get_estimate(self, x0, x_dm, yd):
         """Get the current estimate of the state based on recent priors."""
@@ -345,31 +347,28 @@ class MHE:
 
         if _JAX_AVAILABLE:
             try:
-                x_dm_j = jnp.asarray(x_dm)
-                yd_j = jnp.asarray(yd)
+                if self._rfun_compiled is None:
+                    def rfun_jax(z, xdm, yb):
+                        z = jnp.asarray(z)
+                        return self._cost_vector_jax(z, xdm, yb)
 
-                def rfun_jax(z):
-                    z = jnp.asarray(z)
-                    return self._cost_vector_jax(z, x_dm_j, yd_j)
+                    self._rfun_compiled = jax.jit(rfun_jax)
+                    self._jac_compiled = jax.jit(jax.jacfwd(rfun_jax))
 
-                # JIT-compile residual and its Jacobian (forward-mode good when m >> n)
-                rfun_jit = jax.jit(rfun_jax)
-                jac_jit = jax.jit(jax.jacfwd(rfun_jax))
+                    _ = self._rfun_compiled(x0, jnp.asarray(x_dm), jnp.asarray(yd))
+                    _ = self._jac_compiled(x0, jnp.asarray(x_dm), jnp.asarray(yd))
 
-                def res_for_scipy(z):
-                    return np.asarray(rfun_jit(jnp.asarray(z)))
-
-                def jac_for_scipy(z):
-                    return np.asarray(jac_jit(jnp.asarray(z)))
-
-                # Warm up compilation once
-                _ = res_for_scipy(x0)
-                _ = jac_for_scipy(x0)
+                res_for_scipy = lambda z: np.asarray(
+                    self._rfun_compiled(z, jnp.asarray(x_dm), jnp.asarray(yd))
+                )
+                jac_for_scipy = lambda z: np.asarray(
+                    self._jac_compiled(z, jnp.asarray(x_dm), jnp.asarray(yd))
+                )
 
                 xopt = opt.least_squares(
                     res_for_scipy,
                     x0,
-                    jac=jac_for_scipy,   # JAX autodiff-based Jacobian
+                    jac=jac_for_scipy,
                     method="lm",
                 )
                 return xopt["x"][-self._nstate:]
@@ -378,14 +377,13 @@ class MHE:
                     f"JAX autodiff Jacobian unavailable; falling back to SciPy 3-point. Reason: {_e}"
                 )
 
-        # Fallback: SciPy finite-difference Jacobian (original behavior)
+            # Fallback: SciPy finite-difference Jacobian (original behavior)
         xopt = opt.least_squares(
             rfun_np,
             x0,
             jac="3-point",
             method="lm",
         )
-
         return xopt["x"][-self._nstate:]
 
     @staticmethod
