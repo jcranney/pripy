@@ -8,7 +8,6 @@ dependencies = [
     "numpy",
     "scipy",
     "aotools",
-    "torch",
     "gym",
     "gymnasium",
     "pygame",
