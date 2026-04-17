@@ -1,7 +1,12 @@
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-from stable_baselines3 import PPO
+try:
+    from sbx import PPO               # JAX-based PPO (preferred, much faster)
+    _USING_JAX_PPO = True
+except ImportError:
+    from stable_baselines3 import PPO  # PyTorch fallback
+    _USING_JAX_PPO = False
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -14,25 +19,23 @@ from pripy.algos import MHE
 
 
 # ===== Hyperparameters =====
-NBUFFER          = 3
-GAIN             = 0.2
-EPISODE_LEN      = 200   # used during PPO training (keep short for speed)
-ROLLOUT_LEN      = 500   # used for final GIF/comparison
-DELTA_SCALE      = 1.0       # scaling removed: action_space is now [-0.01, 0.01] directly
-TRAIN_TIMESTEPS  = 200_000
+NBUFFER         = 3
+N_STACK         = 3      # PSF frames stacked in observation (addresses single-frame limitation)
+GAIN            = 0.2
+EPISODE_LEN     = 200    # steps per training episode
+ROLLOUT_LEN     = 500    # steps for evaluation rollout
+RL_MAX_ACTION   = 0.01   # RL action space directly bounded to [-0.01, 0.01]
+TRAIN_TIMESTEPS = 200_000
 
-GATE_START = 0    # RL starts from step 0
-GATE_END   = 60   # RL reaches full authority by step 60
-
-ACTION_PENALTY_COEF  = 0.05
-STREHL_DROP_PENALTY  = 3.0
+ACTION_PENALTY_COEF = 0.05
+STREHL_DROP_PENALTY = 3.0
 
 
 def _strehl_reward(strehl: float, prev_strehl: float, action_norm: float) -> float:
     """
     Reward = sigmoid(Strehl)
-           - large penalty when Strehl drops
-           - small penalty for large RL actions
+           - large penalty when Strehl drops   (promotes stability)
+           - small penalty for large RL actions (suppresses jitter)
     """
     k = 10.0
     reward_strehl  = 1.0 / (1.0 + np.exp(-k * (strehl - 0.5)))
@@ -42,6 +45,19 @@ def _strehl_reward(strehl: float, prev_strehl: float, action_norm: float) -> flo
 
 
 class RLMHEEnv(gym.Env):
+    """
+    RL environment wrapping MHE control.
+
+    Observation (1218-dim):
+        - N_STACK=3 consecutive normalised PSF frames  (3 × 400 = 1200 dims)
+        - N_STACK=3 corresponding MHE commands         (3 × 6   = 18 dims)
+      The RL agent receives both temporal context (stacked frames) and the
+      full history of MHE control signals associated with those frames.
+
+    Action (6-dim, bounded [-0.01, 0.01]):
+        Residual correction added on top of the MHE increment.
+        Action space is directly at the target scale (no external ε factor).
+    """
     metadata = {"render_modes": []}
 
     def __init__(self, max_steps: int = EPISODE_LEN):
@@ -49,43 +65,59 @@ class RLMHEEnv(gym.Env):
         self.env = gym.make("SegmentPhasingFP-v0")
         self.env.unwrapped.max_steps = max_steps
 
-        self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(400,), dtype=np.float32,
-        )
-        self.action_space = spaces.Box(
-            low=-0.01, high=0.01, shape=(6,), dtype=np.float32,
-        )
-
         self.model = psf.PSFAutoDiff(ideal=True)
         self.model.state   *= 0.0
         self.model.command *= 0.0
         self.ctrl = MHE.from_model(self.model, nbuffer=NBUFFER, use_jax=True)
 
-        self.nmodes = self.model.state.shape[0]
-        self.nmeas  = 20 * 20
-        self.current_step = 0
+        self.nmodes = self.model.state.shape[0]   # 6
+        self.nmeas  = 20 * 20                      # 400
 
+        # obs = [frame_{t-2}, frame_{t-1}, frame_t, com_{t-2}, com_{t-1}, com_t]
+        psf_dim = N_STACK * self.nmeas     # 1200
+        com_dim = N_STACK * self.nmodes    # 18
+        self.observation_space = spaces.Box(
+            low  = np.concatenate([np.zeros(psf_dim, dtype=np.float32),
+                                   np.full(com_dim, -2.0, dtype=np.float32)]),
+            high = np.concatenate([np.ones(psf_dim, dtype=np.float32),
+                                   np.full(com_dim,  2.0, dtype=np.float32)]),
+            dtype=np.float32,
+        )
+
+        self.action_space = spaces.Box(
+            low=-RL_MAX_ACTION, high=RL_MAX_ACTION,
+            shape=(self.nmodes,), dtype=np.float32,
+        )
+
+        self.current_step = 0
+        self.frame_buffer = None   # (N_STACK * nmeas,)
+        self.com_buffer   = None   # (N_STACK * nmodes,)
         self.x0 = self.x_dm = self.yd = self.com = self.old_com = None
         self.last_raw_obs = None
         self.prev_strehl  = 0.0
 
-    def _preprocess_obs(self, obs):
+    # ------------------------------------------------------------------
+    def _preprocess_frame(self, obs) -> np.ndarray:
         return (obs.astype(np.float32) / 65_535.0).flatten()
 
     def _init_controller_buffers(self):
-        self.x0      = np.zeros([NBUFFER, self.nmodes], dtype=np.float64).flatten()
-        self.x_dm    = np.zeros([NBUFFER, self.nmodes], dtype=np.float64).flatten()
-        self.yd      = np.zeros([NBUFFER, self.nmeas],  dtype=np.float32)
-        self.com     = np.zeros(self.nmodes, dtype=np.float32)
-        self.old_com = self.com.copy()
+        self.x0          = np.zeros([NBUFFER, self.nmodes], dtype=np.float64).flatten()
+        self.x_dm        = np.zeros([NBUFFER, self.nmodes], dtype=np.float64).flatten()
+        self.yd          = np.zeros([NBUFFER, self.nmeas],  dtype=np.float32)
+        self.com         = np.zeros(self.nmodes, dtype=np.float32)
+        self.old_com     = self.com.copy()
+        self.frame_buffer = np.zeros(N_STACK * self.nmeas,  dtype=np.float32)
+        self.com_buffer   = np.zeros(N_STACK * self.nmodes, dtype=np.float32)
 
-    def _rl_gate_weight(self):
-        if self.current_step <= GATE_START:
-            return 0.0
-        if self.current_step >= GATE_END:
-            return 1.0
-        return (self.current_step - GATE_START) / (GATE_END - GATE_START)
+    def _build_obs(self, normalized_frame: np.ndarray) -> np.ndarray:
+        """Shift both buffers left, insert new entries, concatenate."""
+        self.frame_buffer[:-self.nmeas]  = self.frame_buffer[self.nmeas:]
+        self.frame_buffer[-self.nmeas:]  = normalized_frame
+        self.com_buffer[:-self.nmodes]   = self.com_buffer[self.nmodes:]
+        self.com_buffer[-self.nmodes:]   = self.com.astype(np.float32)
+        return np.concatenate([self.frame_buffer, self.com_buffer])
 
+    # ------------------------------------------------------------------
     def reset(self, *, seed=None, options=None):
         obs, info = self.env.reset(seed=seed)
         self.current_step = 0
@@ -93,28 +125,32 @@ class RLMHEEnv(gym.Env):
         self._init_controller_buffers()
         self.last_raw_obs = obs
         self.yd[-1, ...] = obs.flatten()
-        return self._preprocess_obs(obs), info
+
+        normalized = self._preprocess_frame(obs)
+        self.frame_buffer[:] = np.tile(normalized, N_STACK)
+        # com_buffer already zero-initialised (matching com = zeros)
+        init_obs = np.concatenate([self.frame_buffer, self.com_buffer])
+        return init_obs, info
 
     def step(self, action):
         self.current_step += 1
 
+        # Shift MHE buffers
         self.yd[:-1,  ...] = self.yd[1:,  ...]
         self.yd[-1,   ...] = self.last_raw_obs.flatten()
         self.x_dm[:-self.nmodes] = self.x_dm[self.nmodes:]
         self.x_dm[-self.nmodes:] = self.com
         self.old_com = self.com.copy()
 
+        # Run MHE before applying action
         if self.current_step >= NBUFFER:
             x_hat = self.ctrl.get_estimate(self.x0, self.x_dm, self.yd)
             self.com = (1.0 - GAIN) * self.com - GAIN * x_hat
             self.x0[:-self.nmodes] = self.x0[self.nmodes:]
             self.x0[-self.nmodes:] = x_hat
-        else:
-            x_hat = np.zeros(self.nmodes, dtype=np.float32)
 
         mhe_increment = self.com - self.old_com
-        gate_weight   = self._rl_gate_weight()
-        rl_delta      = gate_weight * np.clip(action, -1.0, 1.0) * DELTA_SCALE
+        rl_delta      = np.clip(action, -RL_MAX_ACTION, RL_MAX_ACTION)
 
         final_action = np.clip(
             mhe_increment + rl_delta,
@@ -137,13 +173,14 @@ class RLMHEEnv(gym.Env):
         info = dict(info)
         info["se_strehl"] = current_strehl
 
-        return self._preprocess_obs(obs), reward, terminated, truncated, info
+        normalized = self._preprocess_frame(obs)
+        return self._build_obs(normalized), reward, terminated, truncated, info
 
 
 # ---------------------------------------------------------------------------
 # Run pure MHE (no RL) for comparison
-# FIX: MHE now runs BEFORE env.step so the increment is actually applied.
-#      Previously action = com - old_com was always 0 (bug).
+# Buffer handling mirrors RLMHEEnv.step exactly so that eps=0 and MHE-only
+# produce identical results with the same seed.
 # ---------------------------------------------------------------------------
 def run_mhe_only(seed: int = 0) -> tuple[list, list, list]:
     """Run the MHE controller without any RL policy.
@@ -163,34 +200,33 @@ def run_mhe_only(seed: int = 0) -> tuple[list, list, list]:
 
     x0   = np.zeros([NBUFFER, nmodes], dtype=np.float64).flatten()
     x_dm = np.zeros([NBUFFER, nmodes], dtype=np.float64).flatten()
-    yd   = np.zeros([NBUFFER, nmeas],  dtype=np.float64)
+    yd   = np.zeros([NBUFFER, nmeas],  dtype=np.float32)
     com  = np.zeros(nmodes, dtype=np.float32)
+
+    last_raw_obs = obs
+    yd[-1, ...] = obs.flatten()
 
     frames     = []
     se_strehls = []
     le_strehls = []
 
-    for it in tqdm(range(ROLLOUT_LEN), desc="MHE-only rollout"):
-        old_com = com.copy()
-
-        # Shift observation and command buffers
+    for step in tqdm(range(1, ROLLOUT_LEN + 1), desc="MHE-only rollout"):
         yd[:-1, ...] = yd[1:, ...]
-        yd[-1,  ...] = obs.flatten()
+        yd[-1,  ...] = last_raw_obs.flatten()
         x_dm[:-nmodes] = x_dm[nmodes:]
         x_dm[-nmodes:] = com
+        old_com = com.copy()
 
-        # Run MHE BEFORE env.step so the computed increment is applied this step
-        if it >= NBUFFER:
+        if step >= NBUFFER:
             x_hat  = ctrl.get_estimate(x0, x_dm, yd)
             com    = (1.0 - GAIN) * com - GAIN * x_hat
             x0[:-nmodes] = x0[nmodes:]
             x0[-nmodes:] = x_hat
 
-        mhe_increment = com - old_com   # actual non-zero correction
+        mhe_increment = com - old_com
 
         obs, _, _, truncated, info = base_env.step(mhe_increment)
-        # Ignore terminated (Strehl<0.1 early-stop) to match RLMHEEnv behaviour,
-        # which hardcodes terminated=False and always runs the full rollout.
+        last_raw_obs = obs
 
         se_strehl = float(np.clip(info.get("se_strehl", 0.0), 0.0, 1.0))
         le_strehl = float(np.clip(info.get("le_strehl", 0.0), 0.0, 1.0))
@@ -205,12 +241,10 @@ def run_mhe_only(seed: int = 0) -> tuple[list, list, list]:
 
 
 # ---------------------------------------------------------------------------
-# Run RL+MHE with zero RL actions (epsilon = 0 baseline through the RL wrapper)
+# Run RL+MHE with zero RL actions (epsilon = 0 baseline)
 # ---------------------------------------------------------------------------
 def run_eps0(seed: int = 0) -> tuple[list, list, list]:
-    """Run the RLMHEEnv but always pass zero RL actions.
-    This shows what MHE contributes through the same wrapper as the trained agent,
-    providing a fair epsilon=0 baseline.
+    """Run RLMHEEnv with zero RL actions — MHE-only through the same wrapper.
     Returns (frames, se_strehls, le_strehls).
     """
     env = RLMHEEnv(max_steps=ROLLOUT_LEN)
@@ -221,9 +255,11 @@ def run_eps0(seed: int = 0) -> tuple[list, list, list]:
     le_strehls = []
 
     for _ in tqdm(range(ROLLOUT_LEN), desc="eps=0 rollout"):
-        zero_action = np.zeros(6, dtype=np.float32)
+        zero_action = np.zeros(env.nmodes, dtype=np.float32)
         obs, _, terminated, truncated, info = env.step(zero_action)
-        frames.append(obs.reshape(20, 20).copy())
+        # Latest frame = last 400 of the frame section (before com_buffer)
+        frame_end = N_STACK * env.nmeas
+        frames.append(obs[frame_end - env.nmeas : frame_end].reshape(20, 20).copy())
         se_strehls.append(float(info.get("se_strehl", 0.0)))
         le_strehls.append(float(np.clip(info.get("le_strehl", 0.0), 0.0, 1.0)))
         if terminated or truncated:
@@ -279,7 +315,7 @@ def save_gif(
 
 
 # ---------------------------------------------------------------------------
-# Save comparison plot: MHE-only vs eps=0 vs RL+MHE  (SE and LE Strehl)
+# Save comparison plot: MHE-only vs eps=0 vs RL+MHE
 # ---------------------------------------------------------------------------
 def save_comparison(
     se_mhe:  list, le_mhe:  list,
@@ -290,23 +326,19 @@ def save_comparison(
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), facecolor="white")
 
     datasets = [
-        (se_mhe,  le_mhe,  "#888888", "MHE only"),
-        (se_eps0, le_eps0, "#e08800", "RL+MHE  (ε=0)"),
-        (se_rl,   le_rl,   "#2244cc", "RL+MHE  (action∈[-0.01,0.01])"),
+        (se_mhe,  le_mhe,  "#888888", "MHE only",                          "--", 2.5),
+        (se_eps0, le_eps0, "#e08800", "RL+MHE  (ε=0)",                     "-",  1.5),
+        (se_rl,   le_rl,   "#2244cc", f"RL+MHE  (action∈[±{RL_MAX_ACTION}])", "-", 1.5),
     ]
 
     titles = ["Short-Exposure (instantaneous) Strehl", "Long-Exposure Strehl"]
 
     for col, (ax, title) in enumerate(zip(axes, titles)):
-        for se_data, le_data, color, label in datasets:
+        for se_data, le_data, color, label, ls, lw in datasets:
             data = se_data if col == 0 else le_data
             xs   = np.arange(1, len(data) + 1)
-            ax.plot(xs, data, color=color, linewidth=1.5, label=label)
+            ax.plot(xs, data, color=color, linewidth=lw, linestyle=ls, label=label)
 
-        ax.axvline(GATE_START, color="orange", linestyle="--", linewidth=1.0,
-                   label=f"RL gate start ({GATE_START})")
-        ax.axvline(GATE_END,   color="red",    linestyle="--", linewidth=1.0,
-                   label=f"RL gate end ({GATE_END})")
         ax.set_xlim(0, ROLLOUT_LEN)
         ax.set_ylim(0.0, 1.05)
         ax.set_xlabel("#iteration", fontsize=12)
@@ -316,7 +348,8 @@ def save_comparison(
         ax.grid(True, color="#e0e0e0")
         ax.set_facecolor("#eef0f8")
 
-    plt.suptitle("MHE only  vs  RL+MHE (ε=0)  vs  RL+MHE", fontsize=13)
+    plt.suptitle(f"MHE only  vs  RL+MHE (ε=0)  vs  RL+MHE  "
+                 f"[N_STACK={N_STACK}, action∈[±{RL_MAX_ACTION}]]", fontsize=12)
     plt.tight_layout()
     plt.savefig(out, dpi=200)
     plt.close(fig)
@@ -341,18 +374,18 @@ def print_summary(
         return None
 
     rows = [
-        ("MHE only",        se_mhe,  le_mhe),
-        ("RL+MHE  ε=0",     se_eps0, le_eps0),
-        (f"RL+MHE  ε={DELTA_SCALE}", se_rl, le_rl),
+        ("MHE only",                   se_mhe,  le_mhe),
+        ("RL+MHE  ε=0",                se_eps0, le_eps0),
+        (f"RL+MHE  ε=[±{RL_MAX_ACTION}]", se_rl, le_rl),
     ]
 
-    print("\n" + "="*70)
-    print(f"{'Metric':<22} {'SE mean(last 100)':<20} {'LE mean(last 100)':<20} {'Steps to SE>0.9'}")
-    print("-"*70)
+    print("\n" + "="*72)
+    print(f"{'Metric':<26} {'SE mean(last100)':<18} {'LE mean(last100)':<18} {'Steps→SE>0.9'}")
+    print("-"*72)
     for label, se, le in rows:
         s2t = steps_to_threshold(se, 0.9)
-        print(f"{label:<22} {mean_last(se):<20.4f} {mean_last(le):<20.4f} {str(s2t):<15}")
-    print("="*70 + "\n")
+        print(f"{label:<26} {mean_last(se):<18.4f} {mean_last(le):<18.4f} {str(s2t)}")
+    print("="*72 + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -362,14 +395,17 @@ if __name__ == "__main__":
     import os
 
     # ── 1. Train (skipped if ppo_rl_mhe.zip already exists) ───────────────
+    print(f"PPO backend: {'SBX (JAX)' if _USING_JAX_PPO else 'stable-baselines3 (PyTorch)'}")
+
     if os.path.exists("ppo_rl_mhe.zip"):
         print("Found existing ppo_rl_mhe.zip — skipping training, loading model …")
         model = PPO.load("ppo_rl_mhe")
     else:
         train_env = RLMHEEnv()
-        model = PPO(
-            "MlpPolicy",
-            train_env,
+
+        ppo_kwargs = dict(
+            policy="MlpPolicy",
+            env=train_env,
             verbose=1,
             learning_rate=1e-4,
             n_steps=512,
@@ -380,8 +416,11 @@ if __name__ == "__main__":
             ent_coef=0.01,
             vf_coef=0.5,
             max_grad_norm=0.5,
-            device="cpu",
         )
+        if not _USING_JAX_PPO:
+            ppo_kwargs["device"] = "cpu"
+
+        model = PPO(**ppo_kwargs)
         print(f"Training PPO for {TRAIN_TIMESTEPS:,} timesteps …")
         model.learn(total_timesteps=TRAIN_TIMESTEPS)
         model.save("ppo_rl_mhe")
@@ -395,24 +434,25 @@ if __name__ == "__main__":
     for _ in tqdm(range(ROLLOUT_LEN), desc="RL+MHE rollout"):
         action, _ = model.predict(obs, deterministic=True)
         obs, _, terminated, truncated, info = rl_env.step(action)
-        rl_frames.append(obs.reshape(20, 20).copy())
+        frame_end = N_STACK * rl_env.nmeas
+        rl_frames.append(obs[frame_end - rl_env.nmeas : frame_end].reshape(20, 20).copy())
         rl_se.append(float(info.get("se_strehl", 0.0)))
         rl_le.append(float(np.clip(info.get("le_strehl", 0.0), 0.0, 1.0)))
         if terminated or truncated:
             break
 
-    # ── 3. eps=0 rollout (MHE through RL wrapper, zero RL actions) ────────
+    # ── 3. eps=0 rollout ──────────────────────────────────────────────────
     print("\nRolling out eps=0 episode …")
     _, eps0_se, eps0_le = run_eps0(seed=0)
 
-    # ── 4. MHE-only rollout (fixed baseline) ──────────────────────────────
+    # ── 4. MHE-only rollout ───────────────────────────────────────────────
     print("\nRolling out MHE-only episode …")
     mhe_frames, mhe_se, mhe_le = run_mhe_only(seed=0)
 
-    # ── 5. Print summary table ─────────────────────────────────────────────
+    # ── 5. Summary table ──────────────────────────────────────────────────
     print_summary(mhe_se, mhe_le, eps0_se, eps0_le, rl_se, rl_le)
 
-    # ── 6. Save GIF (RL+MHE) ──────────────────────────────────────────────
+    # ── 6. Save GIF ───────────────────────────────────────────────────────
     print()
     save_gif(rl_frames, rl_se, fps=20, out="simul.gif")
 
