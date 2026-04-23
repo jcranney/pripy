@@ -30,18 +30,39 @@ TRAIN_TIMESTEPS = 200_000
 ACTION_PENALTY_COEF = 0.05
 STREHL_DROP_PENALTY = 3.0
 
+# ----- Primary Strehl-term shaping -----------------------------------------
+# Primary reward signal is a sigmoid-mapped short-exposure Strehl ratio:
+#     sigma(beta * (strehl - tau))
+# which concentrates the learning gradient in the collapse-regime Strehl
+# range [0.3, 0.7] and saturates near 1 above tau, preventing marginal
+# steady-state gains from dominating the optimisation. Setting
+# USE_SIGMOID_REWARD = False falls back to the raw-Strehl primary signal
+# used as the ablation variant in the reward-shaping study.
+USE_SIGMOID_REWARD = True
+SIGMOID_BETA       = 8.0
+SIGMOID_TAU        = 0.5
+
+
+def _map_strehl(strehl: float) -> float:
+    """Apply the primary-signal mapping to an instantaneous Strehl value."""
+    if USE_SIGMOID_REWARD:
+        return float(1.0 / (1.0 + np.exp(-SIGMOID_BETA * (strehl - SIGMOID_TAU))))
+    return float(strehl)
+
 
 def _strehl_reward(strehl: float, prev_strehl: float, action_norm: float) -> float:
     """
-    Reward = sigmoid(Strehl)
-           - large penalty when Strehl drops   (promotes stability)
-           - small penalty for large RL actions (suppresses jitter)
+    Reward = primary signal                        (sigmoid-mapped by default)
+           - large penalty when Strehl drops       (promotes stability)
+           - small penalty for large RL actions    (suppresses jitter)
+    The drop penalty is defined on the raw Strehl difference, independent of
+    the primary-signal mapping, so the penalty scale is invariant to the
+    choice of USE_SIGMOID_REWARD.
     """
-    k = 10.0
-    reward_strehl  = 1.0 / (1.0 + np.exp(-k * (strehl - 0.5)))
+    primary        = _map_strehl(strehl)
     drop_penalty   = STREHL_DROP_PENALTY * max(0.0, prev_strehl - strehl)
     action_penalty = ACTION_PENALTY_COEF * action_norm
-    return float(reward_strehl - drop_penalty - action_penalty)
+    return float(primary - drop_penalty - action_penalty)
 
 
 class RLMHEEnv(gym.Env):
